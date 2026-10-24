@@ -1,10 +1,14 @@
 # 模块二：历史信息光学压缩
 
+支持两种排版来源：原 CD 固定 renderer，以及针对新数据集用十条真实训练样本初始化的视觉 agent 策略。agent 始终保留上方用户、下方物品的单列分区和固定字体字号，通过修改 Python 排版程序优化换行、字段合并、宽度和间距。初始化工具、真实 token / 阅读检查、冻结输出与命令见 [视觉排版优化指南](optimizer/README.md)。
+
 完整批量入口会从模块一刚生成的语义训练、验证、测试集构建三个划分，渲染所有候选、组装图文输入，并调用实际模型 processor 检查每条输入的总 token、视觉 token 和长度上限。超过上限直接报错，不静默截断。
 
 ```bash
 python -m optical_compression.pipeline --datasets artifacts/cd_prepare/datasets --model data/models/Qwen3-VL-8B-Instruct --output artifacts/cd
 ```
+
+使用初始化后的策略时增加 `--layout artifacts/layout_cd_search/frozen` 并使用新的输出目录。此时批量入口还会逐条检查图片总输入 token 严格少于同内容纯文本；策略、字体和 processor 均记录指纹。省略 `--layout` 保持原 CD 行为。
 
 `--model` 使用基座目录里的 processor；此阶段不加载完整模型权重。每个划分输出 `images/`、`candidates.jsonl`、`sft_pairs.jsonl`、`actual_tokens.json` 和渲染 manifest。该根目录可直接传给模块三。省略 `--model` 仅用于 CPU 渲染演示，模块三完整入口会要求先通过真实 processor 检查。
 

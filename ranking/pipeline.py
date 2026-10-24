@@ -39,6 +39,8 @@ def main():
     if config['fusion_alpha'] != 1.5:
         raise ValueError('the reference CD workflow uses fixed alpha=1.5')
     workflow = Workflow(a.output, dict(model=str(a.model.resolve()),
+        **(dict(dense_manifest_sha256=digest(a.data / 'complete.json'))
+           if dense_manifest.get('layout_signature') else {}),
         grpo_config_sha256=digest(a.grpo_config), sft_learning_rate=a.sft_learning_rate,
         dataset_manifest_sha256=digest(a.datasets / 'manifest.json'),
         input_sha256={s: digest(f) for s, f in inputs.items()}, sft_pairs_sha256=digest(pair_file)))

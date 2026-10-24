@@ -53,6 +53,8 @@ python -m pip install -r requirements.txt
 
 GPU 训练限定单张可见 CUDA 设备，要求支持 BF16。字体和字体许可随 `optical_compression/fonts/` 提供，以固定页面排版。
 
+新数据集可先用十条真实训练样本运行 [视觉排版优化 agent](optical_compression/optimizer/README.md)，在固定上下分区、字体和字号下搜索排版代码。通过真实 token 和本地模型阅读检查后导出固定策略，第二阶段用 `--layout` 加载；原 CD renderer 仍是默认基线。
+
 ## 数据与基座
 
 - 从 [Amazon Reviews 2023](https://amazon-reviews-2023.github.io/) 获取 CDs & Vinyl 的 reviews 和 metadata。reviews 使用 `user_id / parent_asin / rating / timestamp`；metadata 使用 `parent_asin / title / description / categories / store` 等字段。

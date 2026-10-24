@@ -17,8 +17,13 @@ def main():
     if not (model / 'config.json').is_file():
         raise FileNotFoundError('prepare the pretrained base model first: ' + str(model))
     grpo = Path(config['grpo_config']).resolve()
+    strategy = None
+    if config.get('layout_strategy'):
+        from optical_compression.layout_engine import FrozenLayout
+        strategy = FrozenLayout(config['layout_strategy'])
     workflow = Workflow(root, dict(config=config, config_sha256=digest(a.config),
-        raw_sha256={key: digest(config[key]) for key in ['reviews', 'metadata']}, grpo_sha256=digest(grpo)))
+        raw_sha256={key: digest(config[key]) for key in ['reviews', 'metadata']}, grpo_sha256=digest(grpo),
+        **(dict(layout_signature=strategy.signature) if strategy else {})))
 
     def run(name, module, arguments, outputs):
         workflow.run(name, [sys.executable, '-m', module, *arguments], outputs)
@@ -44,7 +49,8 @@ def main():
         run('validate_' + kind, 'semantic_context.pipeline', [finish, '--work', semantic,
             '--results', results], outputs)
     run('optical_compression', 'optical_compression.pipeline', ['--datasets', semantic / 'datasets',
-        '--model', model, '--output', dense], [dense / 'complete.json'])
+        '--model', model, '--output', dense,
+        *(['--layout', config['layout_strategy']] if strategy else [])], [dense / 'complete.json'])
     run('train_and_evaluate', 'ranking.pipeline', ['--data', dense, '--datasets', semantic / 'datasets',
         '--model', model, '--grpo-config', grpo, '--output', ranking,
         '--sft-learning-rate', config.get('sft_learning_rate', 1e-5)], [ranking / 'results.json'])

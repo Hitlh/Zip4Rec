@@ -11,31 +11,46 @@ def main():
     p.add_argument('--datasets', type=Path, required=True)
     p.add_argument('--output', type=Path, required=True)
     p.add_argument('--model', type=Path, help='Actual processor for complete input-length validation')
+    p.add_argument('--layout', type=Path, help='Qualified frozen agent strategy directory')
     a = p.parse_args()
+    strategy = None
+    if a.layout:
+        from .layout_engine import FrozenLayout
+        strategy = FrozenLayout(a.layout)
+        if a.model:
+            from .measurement import TokenMeter
+            if TokenMeter(a.model).identity != strategy.metadata['processor']:
+                raise ValueError('frozen strategy was optimized for a different processor or prompt protocol')
     manifest = json.loads((a.datasets / 'manifest.json').read_text())
     for name, expected in manifest['output_sha256'].items():
         if digest(a.datasets / name) != expected:
             raise ValueError('semantic dataset changed: ' + name)
     workflow = Workflow(a.output, dict(datasets=str(a.datasets.resolve()),
         dataset_manifest_sha256=digest(a.datasets / 'manifest.json'),
-        model=str(a.model.resolve()) if a.model else None))
+        model=str(a.model.resolve()) if a.model else None,
+        **(dict(layout_signature=strategy.signature) if strategy else {})))
     for split in ['train', 'valid', 'test']:
         if manifest['splits'][split]['natural_hit_groups'] == 0:
             raise ValueError('no natural-hit samples in ' + split)
         workflow.run('render_' + split,
             [sys.executable, '-m', 'optical_compression.build', '--samples',
-             a.datasets / f'{split}_candidates.jsonl', '--output', a.output / split],
+             a.datasets / f'{split}_candidates.jsonl', '--output', a.output / split,
+             *(['--layout', a.layout] if a.layout else [])],
             [a.output / split / 'manifest.json', a.output / split / 'sft_pairs.jsonl',
              a.output / split / 'candidates.jsonl'])
         if a.model:
             workflow.run('encode_' + split,
                 [sys.executable, '-m', 'optical_compression.measure_tokens', '--data',
                  a.output / split / 'candidates.jsonl', '--model', a.model,
-                 '--output', a.output / split / 'actual_tokens.json'],
+                 '--output', a.output / split / 'actual_tokens.json',
+                 *(['--text-source', a.datasets / f'{split}_candidates.jsonl',
+                    '--max-length', strategy.metadata['evaluation_limits']['max_length']] if strategy else [])],
                 [a.output / split / 'actual_tokens.json'])
     summary = dict(dataset_manifest_sha256=digest(a.datasets / 'manifest.json'),
                    splits=manifest['splits'], processor_validated=bool(a.model),
-                   image_format='PNG compact640 font14; dynamic height, no text truncation')
+                   **(dict(layout_signature=strategy.signature) if strategy else {}),
+                   image_format='PNG fixed-font top/bottom; dynamic geometry, no text truncation'
+                   if strategy else 'PNG compact640 font14; dynamic height, no text truncation')
     (a.output / 'complete.json').write_text(json.dumps(summary, indent=2) + '\n')
 
 

@@ -44,6 +44,7 @@ def main():
     source.add_argument('--samples', type=Path, help='Module-one semantic candidate JSONL')
     p.add_argument('--item-summaries', type=Path)
     p.add_argument('--output', type=Path, required=True)
+    p.add_argument('--layout', type=Path, help='Qualified frozen strategy directory; default uses original CD layout')
     a = p.parse_args()
     if a.output.exists():
         raise FileExistsError(a.output)
@@ -62,11 +63,18 @@ def main():
         pairs, complete, tasks = build(groups, load_validated_items(a.item_summaries), a.output)
         group_count = len(groups)
     a.output.mkdir(parents=True)
-    rendered = [render_compact(t) for t in tasks]
+    layout = 'compact640_font14'
+    if a.layout:
+        from .layout_engine import FrozenLayout
+        strategy = FrozenLayout(a.layout)
+        rendered = strategy.render_tasks(tasks)
+        layout = dict(kind='agent_top_bottom', signature=strategy.signature)
+    else:
+        rendered = [render_compact(t) for t in tasks]
     for name, records in [('sft_pairs', pairs), ('candidates', complete)]:
         (a.output / f'{name}.jsonl').write_text(''.join(json.dumps(r, ensure_ascii=False) + '\n' for r in records))
     (a.output / 'manifest.json').write_text(json.dumps(dict(groups=group_count, pairs=len(pairs),
-        candidates=len(complete), layout='compact640_font14', pages=rendered), indent=2) + '\n')
+        candidates=len(complete), layout=layout, pages=rendered), indent=2) + '\n')
 
 
 if __name__ == '__main__':

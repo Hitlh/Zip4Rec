@@ -18,6 +18,7 @@
 | `retrieval` | LightGCN 设备、训练轮数、验证与测试用户数 |
 | `grpo_config` | [`grpo.json`](grpo.json) 的路径 |
 | `sft_learning_rate` | SFT 学习率 |
+| `layout_strategy`（可选） | 视觉 agent 导出的冻结策略目录；省略时使用原 CD 排版 |
 
 默认核心参数：user-10/item-15；LightGCN 64 维、2 层、35 epoch、学习率 1e-3、DNS=32、模型种子 7；用户组种子 603759240；最近历史长度 3。SFT 为 LoRA r=8、alpha=16、dropout=0.05、学习率 1e-5、3 epoch、梯度累积 16、种子 6062。
 
@@ -54,6 +55,8 @@ python -m semantic_context.pipeline finish-profiles --work artifacts/cd_prepare 
 默认使用 gpt-4o，`prepare --asset-model` 可指定生成模型。请求、返回、schema、版本和内容哈希会保存到运行目录。校验失败时检查相应报告，使用请求执行器的 `retry-input` 构造重试请求；不要将失败或缺失的画像当作有效样本。
 
 ### 2. DensePage
+
+可选的一次性 [视觉 agent 初始化](../../optical_compression/optimizer/README.md) 使用 [`layout_optimizer.json`](layout_optimizer.json) 控制字体、模型与搜索预算。先从真实训练语义样本搜索并固定策略；下列批量入口增加 `--layout <冻结目录>` 即可使用，不再调用 agent。
 
 ```bash
 python -m optical_compression.pipeline --datasets artifacts/cd_prepare/datasets --model data/models/Qwen3-VL-8B-Instruct --output artifacts/cd
