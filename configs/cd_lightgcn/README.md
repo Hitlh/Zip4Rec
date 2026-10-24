@@ -6,7 +6,7 @@
 
 从 [Amazon Reviews 2023](https://amazon-reviews-2023.github.io/) 获取该类别的 reviews 与 metadata，准备本地 [Qwen3-VL-8B-Instruct](https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct)，按根目录 README 安装依赖。
 
-修改 [`pipeline.json`](pipeline.json)：
+复现当前已选 compact 使用 [`pipeline.json`](pipeline.json)；从原始数据运行 agent 选择再渲染使用 [`pipeline_agent.json`](pipeline_agent.json)。按本地环境修改：
 
 | 字段 | 含义 |
 | --- | --- |
@@ -18,7 +18,8 @@
 | `retrieval` | LightGCN 设备、训练轮数、验证与测试用户数 |
 | `grpo_config` | [`grpo.json`](grpo.json) 的路径 |
 | `sft_learning_rate` | SFT 学习率 |
-| `layout_strategy`（可选） | 视觉 agent 导出的冻结策略目录；省略时使用原 CD 排版 |
+| `layout_strategy` | 已选定代码目录；复现配置为 `optical_compression/selected`，也可填 agent 导出的 `frozen/` |
+| `layout_optimizer_config` | 新数据集的一次性搜索配置；语义训练集生成后执行，与 `layout_strategy` 互斥 |
 
 默认核心参数：user-10/item-15；LightGCN 64 维、2 层、35 epoch、学习率 1e-3、DNS=32、模型种子 7；用户组种子 603759240；最近历史长度 3。SFT 为 LoRA r=8、alpha=16、dropout=0.05、学习率 1e-5、3 epoch、梯度累积 16、种子 6062。
 
@@ -31,10 +32,14 @@ GRPO 参数见 `grpo.json`：学习率 1e-6、单 epoch、每次更新 4 个用�
 ```bash
 export CUDA_VISIBLE_DEVICES=0
 export OPENAI_BASE_URL='https://api.openai.com/v1'
+# 新数据集：先选择，再固定调用。
+python run_pipeline.py --config configs/cd_lightgcn/pipeline_agent.json
+
+# 复现已选的 compact：不重复搜索。
 python run_pipeline.py --config configs/cd_lightgcn/pipeline.json
 ```
 
-该入口执行数据筛选和五次上游 LightGCN 训练、物品描述和用户画像请求、返回校验、三类语义集导出、DensePage 渲染和 processor 检查、SFT/GRPO 训练与验证选择、锁定模型的测试评分。请求会使用所配置的服务，训练使用选定 GPU。
+该入口执行数据筛选和五次上游 LightGCN 训练、物品描述和用户画像请求、返回校验、三类语义集导出、新数据集的一次性排版搜索或复用已选代码、固定代码的 DensePage 渲染和 processor 检查、SFT/GRPO 训练与验证选择、锁定模型的测试评分。请求会使用所配置的服务，训练使用选定 GPU。
 
 SFT 保存步数按配对数量计算，GRPO 按训练组数和四分位比例保存。参考规模对应 SFT 158/316/474 和 GRPO 79/158/237/315；其他数据规模会得到自己的检查点。
 
@@ -56,13 +61,21 @@ python -m semantic_context.pipeline finish-profiles --work artifacts/cd_prepare 
 
 ### 2. DensePage
 
-可选的一次性 [视觉 agent 初始化](../../optical_compression/optimizer/README.md) 使用 [`layout_optimizer.json`](layout_optimizer.json) 控制字体、模型与搜索预算。先从真实训练语义样本搜索并固定策略；下列批量入口增加 `--layout <冻结目录>` 即可使用，不再调用 agent。
+先用 [`layout_optimizer.json`](layout_optimizer.json) 控制字体、视觉模型和搜索预算，运行一次 agent：
 
 ```bash
-python -m optical_compression.pipeline --datasets artifacts/cd_prepare/datasets --model data/models/Qwen3-VL-8B-Instruct --output artifacts/cd
+python -m optical_compression.optimize --config configs/cd_lightgcn/layout_optimizer.json --samples artifacts/cd_prepare/datasets/train_candidates.jsonl --model data/models/Qwen3-VL-8B-Instruct --output artifacts/layout_cd_search
 ```
 
-此阶段对 train/valid/test 的所有候选生成页面，组装模型输入，统计实际 token 并检查 2048 长度上限，不静默截断。参见 [模块二](../../optical_compression/README.md)。
+完成后只加载选中代码，不再调用 agent：
+
+```bash
+python -m optical_compression.pipeline --datasets artifacts/cd_prepare/datasets --layout artifacts/layout_cd_search/frozen --model data/models/Qwen3-VL-8B-Instruct --output artifacts/cd
+```
+
+复现本项目已选的 compact 时，跳过上面的选择步骤，把 `--layout` 换为 `optical_compression/selected`。代码位于 [`selected/compact.py`](../../optical_compression/selected/compact.py)，清单标注其为当前选中的排版代码。
+
+渲染阶段对三个划分的全部候选生成页面、组装输入、检查实际 token 和 2048 长度上限，不加载 VLM 权重、不请求 API。冻结的 agent 策略还会逐条检查严格少于纯文本。参见 [模块二](../../optical_compression/README.md)。
 
 ### 3. SFT、GRPO 和评估
 
@@ -74,7 +87,7 @@ SFT 从基座新建语言 LoRA。验证集按 NDCG@10、MRR@10、H@1 降序及�
 
 ## 输出与结果
 
-完整入口默认输出在 `artifacts/zip4rec_cd_full/`；模块级入口使用上述各自的输出目录。
+复现配置输出在 `artifacts/zip4rec_cd_full/`，搜索配置输出在 `artifacts/zip4rec_cd_agent/`；模块级入口使用上述各自的输出目录。
 
 ```text
 semantic/
@@ -82,7 +95,8 @@ semantic/
   sources/                  # 冻结目标、候选、历史和画像上下文
   items/, profiles/         # 生成且通过校验的物品语义与用户画像
   datasets/                 # 语义组、SFT 配对、GRPO 候选、全量评估用户
-densepage/                 # PNG、图文数据与实际 token 统计
+layout_search/             # 搜索模式产生；记录及 frozen/ 选中代码
+densepage/                 # 固定代码生成的 PNG、图文数据与实际 token 统计
 ranking/
    sft/, grpo/              # 本次训练的模型及参考缓存
    validation/              # 候选检查点的验证分数

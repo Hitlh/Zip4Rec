@@ -4,6 +4,7 @@ from dataclasses import asdict, dataclass
 from functools import lru_cache
 import json
 import math
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -11,10 +12,18 @@ import tempfile
 
 from PIL import Image, ImageDraw, ImageFont
 from workflow import digest
+from .presentation import prepare_document
 
 ROOT = Path(__file__).resolve().parents[1]
 FONT = Path(__file__).parent / 'fonts/DejaVuSans.ttf'
-ENGINE_FILES = ['document.py', 'layout_engine.py', 'layout_worker.py']
+BOLD_FONT = Path(__file__).parent / 'fonts/DejaVuSans-Bold.ttf'
+PAGE_TITLE = 'PROFILE-CONDITIONED RELEVANCE'
+FIXED_DECORATIONS = dict(page_title=PAGE_TITLE, title_color='#172033',
+    user_bar='#dbeafe', user_heading='#153e75',
+    item_bar='#dcfce7', item_heading='#166534', body_color='#202938',
+    background='#f7f8fa', border='#c8d0dc', section_bar_height=20)
+ENGINE_FILES = ['document.py', 'presentation.py', 'layout_engine.py', 'layout_worker.py']
+LAYOUT_API_VERSION = 2
 
 
 @lru_cache(maxsize=32)
@@ -31,20 +40,24 @@ def supported_glyph(path, size, char):
 @dataclass(frozen=True)
 class Constraints:
     font_path: str = str(FONT)
+    bold_font_path: str = str(BOLD_FONT)
     font_size: int = 14
     heading_size: int = 15
+    title_size: int = 18
     min_width: int = 256
     max_width: int = 1536
     max_height: int = 16384
     max_pixels: int = 8_000_000
 
     def __post_init__(self):
-        if not Path(self.font_path).is_file():
-            raise FileNotFoundError(self.font_path)
+        for path in [self.font_path, self.bold_font_path]:
+            if not Path(path).is_file():
+                raise FileNotFoundError(path)
         if any(type(getattr(self, name)) is not int for name in
-               ['font_size', 'heading_size', 'min_width', 'max_width', 'max_height', 'max_pixels']):
+               ['font_size', 'heading_size', 'title_size', 'min_width', 'max_width', 'max_height', 'max_pixels']):
             raise ValueError('fixed typography and canvas limits must be integers')
         if not (6 <= self.font_size <= 96 and 6 <= self.heading_size <= 96
+                and 6 <= self.title_size <= 96
                 and 32 <= self.min_width <= self.max_width <= 4096
                 and 32 <= self.max_height <= 32768 and 1 <= self.max_pixels <= 32_000_000):
             raise ValueError('invalid fixed typography or canvas limits')
@@ -82,8 +95,8 @@ def validate_source(source):
             raise ValueError('private names are not allowed')
         if isinstance(node, ast.Attribute):
             if (not isinstance(node.value, ast.Name) or node.value.id != 'metrics'
-                    or node.attr not in {'flow', 'width'} or not isinstance(node.ctx, ast.Load)):
-                raise ValueError('only metrics.flow and metrics.width attributes are available')
+                    or node.attr not in {'flow', 'width', 'prepare'} or not isinstance(node.ctx, ast.Load)):
+                raise ValueError('only metrics.flow, metrics.width and metrics.prepare attributes are available')
     return tree
 
 
@@ -105,12 +118,19 @@ class FontMetrics:
         box = self.font.getbbox(text, anchor='lt')
         return max(self.font.getlength(text), box[2]) - min(0, box[0])
 
-    def flow(self, fields, width, pack=False):
+    def prepare(self, document, presentation):
+        return prepare_document(document, presentation)
+
+    def flow(self, fields, width, pack=False, wrap='split'):
         """Return exact [field_id,start,end] spans; long words also wrap without loss."""
         if not isinstance(width, (int, float)) or not math.isfinite(width) or width < 32:
             raise ValueError('flow width must be finite and >=32')
         if not fields:
             return []
+        if wrap not in ('split', 'words'):
+            raise ValueError('wrap must be split or words')
+        if wrap == 'words':
+            return self.word_flow(fields, width, pack)
         texts = {f['id']: f['text'] for f in fields}
         rows, current = [], []
         for field in fields:
@@ -146,6 +166,34 @@ class FontMetrics:
                 if start < len(text):
                     rows.append(current)
                     current = []
+        if current:
+            rows.append(current)
+        return rows
+
+    def word_flow(self, fields, width, pack):
+        """Word wrapping retains whitespace in spans; draw with trim_rows=True.
+
+        No partial word is squeezed into a preceding line. Oversized words fail
+        geometry validation rather than overflowing the page as the legacy renderer can.
+        """
+        texts = {f['id']: f['text'] for f in fields}
+        rows, current = [], []
+        for field in fields:
+            if not pack and current:
+                rows.append(current)
+                current = []
+            text = field['text']
+            for match in re.finditer(r'\s*\S+\s*|\s+', text):
+                span = [field['id'], match.start(), match.end()]
+                if current and self.width(row_text(current + [span], texts).strip()) > width:
+                    rows.append(current)
+                    current = []
+                if self.width(text[match.start():match.end()].strip()) > width:
+                    raise ValueError('a word is wider than the available width; use wrap=split')
+                current.append(span)
+                if len(current) > 1 and current[-2][0] == span[0]:
+                    current[-2][2] = span[2]
+                    current.pop()
         if current:
             rows.append(current)
         return rows
@@ -200,42 +248,97 @@ def validate_rows(rows, fields):
 
 
 def render_plan(doc, plan, constraints, path):
-    if not isinstance(plan, dict) or set(plan) != {'width', 'padding', 'line_gap', 'section_gap', 'user_rows', 'item_rows'}:
+    required = {'width', 'padding', 'line_gap', 'section_gap', 'user_rows', 'item_rows'}
+    optional = {'margins', 'line_height', 'text_anchor', 'text_origin', 'height_multiple', 'min_height',
+                'trim_rows', 'presentation'}
+    if not isinstance(plan, dict) or not required <= set(plan) or set(plan) - required - optional:
         raise ValueError('unexpected layout plan keys')
     for key in ['width', 'padding', 'line_gap', 'section_gap']:
         if type(plan[key]) is not int:
             raise ValueError('layout dimensions must be integers')
     width, pad = plan['width'], plan['padding']
-    if not (constraints.min_width <= width <= constraints.max_width and 1 <= pad <= width // 4
+    if not (constraints.min_width <= width <= constraints.max_width and 8 <= pad <= width // 4
             and 0 <= plan['line_gap'] <= 64 and 0 <= plan['section_gap'] <= 256):
         raise ValueError('layout dimensions violate constraints')
-    texts = {section: validate_rows(plan[section + '_rows'], doc[section]) for section in ['user', 'item']}
+    margins = plan.get('margins', dict(left=pad, right=pad, top=pad + 2, bottom=pad))
+    if (not isinstance(margins, dict) or set(margins) != {'left', 'right', 'top', 'bottom'}
+            or any(type(value) is not int for value in margins.values())
+            or not 8 <= margins['left'] <= width // 4
+            or not 8 <= margins['right'] <= width // 4
+            or not 4 <= margins['top'] <= 512 or not 4 <= margins['bottom'] <= 512):
+        raise ValueError('invalid independent margins')
+    left, right = margins['left'], margins['right']
+    line_height = plan.get('line_height')
+    if line_height is not None and (type(line_height) is not int or not 1 <= line_height <= 256):
+        raise ValueError('line_height must be null or an integer in 1..256')
+    anchor = plan.get('text_anchor', 'lt')
+    origin = plan.get('text_origin', 'ink')
+    multiple, minimum = plan.get('height_multiple', 1), plan.get('min_height', 32)
+    trim = plan.get('trim_rows', False)
+    if (anchor not in ('lt', 'la') or origin not in ('ink', 'font') or type(trim) is not bool
+            or type(multiple) is not int or not 1 <= multiple <= 256
+            or type(minimum) is not int or not 32 <= minimum <= constraints.max_height):
+        raise ValueError('invalid text anchor or height alignment')
+    presented = prepare_document(doc, plan.get('presentation'))
+    texts = {section: validate_rows(plan[section + '_rows'], presented[section]) for section in ['user', 'item']}
+    if trim:
+        texts = {section: [text.strip() for text in rows] for section, rows in texts.items()}
     body = load_font(constraints.font_path, constraints.font_size)
-    heading = load_font(constraints.font_path, constraints.heading_size)
-    for char in set(''.join(f['text'] for fields in doc.values() for f in fields)):
+    heading = load_font(constraints.bold_font_path, constraints.heading_size)
+    title_font = load_font(constraints.bold_font_path, constraints.title_size)
+    for char in set(''.join(text for rows in texts.values() for text in rows)):
         if not supported_glyph(constraints.font_path, constraints.font_size, char):
             raise ValueError('fixed font has no glyph for ' + repr(char))
-    if not all(supported_glyph(constraints.font_path, constraints.heading_size, c)
+    if not all(supported_glyph(constraints.bold_font_path, constraints.heading_size, c)
                for c in 'USER PROFILECANDIDATE ITEM'):
         raise ValueError('fixed font cannot render the section headings')
-    commands, y = [], pad
+    if not all(supported_glyph(constraints.bold_font_path, constraints.title_size, c) for c in PAGE_TITLE):
+        raise ValueError('fixed font cannot render the page title')
+    # Decorations are owned by this engine, never by candidate layout code.
+    for text, fnt in [(PAGE_TITLE, title_font), ('USER PROFILE', heading), ('CANDIDATE ITEM', heading)]:
+        box = fnt.getbbox(text)
+        if max(fnt.getlength(text), box[2]) - min(0, box[0]) > width - left - right:
+            raise ValueError('fixed title or heading exceeds page width')
+    title_box = title_font.getbbox(PAGE_TITLE)
+    commands, bars = [], []
+    title_y = margins['top']
+    y = title_y + max(24, title_box[3] + 2)
+    ink_bottom = y
     for section, title in [('user', 'USER PROFILE'), ('item', 'CANDIDATE ITEM')]:
         if section == 'item':
             y += plan['section_gap']
-        for text, fnt in [(title, heading)] + [(t, body) for t in texts[section]]:
-            box = fnt.getbbox(text, anchor='lt')
+        if y < ink_bottom:
+            raise ValueError('body text overlaps a fixed section bar')
+        heading_box = heading.getbbox(title)
+        bar_height = max(FIXED_DECORATIONS['section_bar_height'], heading_box[3] + 2)
+        bars.append((y, bar_height, section, title))
+        y += bar_height + 4
+        ink_bottom = y - 4
+        for text in texts[section]:
+            fnt = body
+            box = fnt.getbbox(text, anchor=anchor)
             ink_width = max(fnt.getlength(text), box[2]) - min(0, box[0])
-            if ink_width > width - 2 * pad:
+            if ink_width > width - left - right:
                 raise ValueError('text exceeds page width')
-            commands.append((pad - min(0, box[0]), y, text, fnt))
-            y += max(1, box[3] - box[1]) + plan['line_gap']
-    height = y + pad
+            if text and y + box[1] < ink_bottom:
+                raise ValueError('body lines overlap; increase line_height or line_gap')
+            commands.append((left - min(0, box[0]) if origin == 'ink' else left, y, text, fnt))
+            if text:
+                ink_bottom = y + box[3]
+            y += (line_height if line_height is not None else max(1, box[3] - box[1])) + plan['line_gap']
+    height = max(minimum, y + margins['bottom'], ink_bottom + 4)
+    height = ((height + multiple - 1) // multiple) * multiple
     if height > constraints.max_height or height * width > constraints.max_pixels:
         raise ValueError('page exceeds canvas limits')
-    image = Image.new('RGB', (width, height), 'white')
+    image = Image.new('RGB', (width, height), FIXED_DECORATIONS['background'])
     draw = ImageDraw.Draw(image)
+    draw.rectangle((4, 4, width - 4, height - 4), fill='white', outline=FIXED_DECORATIONS['border'], width=1)
+    draw.text((left, title_y), PAGE_TITLE, font=title_font, fill=FIXED_DECORATIONS['title_color'])
+    for bar_y, bar_height, section, title in bars:
+        draw.rectangle((7, bar_y, width - 7, bar_y + bar_height - 1), fill=FIXED_DECORATIONS[section + '_bar'])
+        draw.text((left, bar_y + 1), title, font=heading, fill=FIXED_DECORATIONS[section + '_heading'])
     for x, y, text, fnt in commands:
-        draw.text((x, y), text, font=fnt, fill='black', anchor='lt')
+        draw.text((x, y), text, font=fnt, fill=FIXED_DECORATIONS['body_color'], anchor=anchor)
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     image.save(path, optimize=True)
@@ -252,16 +355,21 @@ class FrozenLayout:
             raise ValueError('layout is not a qualified frozen strategy')
         if self.metadata['engine_sha256'] != engine_hashes():
             raise ValueError('layout engine changed; revalidate and freeze the strategy again')
-        if not {'layout.py', 'fonts/body.ttf'} <= set(self.metadata['files_sha256']):
-            raise ValueError('frozen layout must fingerprint both source and font')
+        if self.metadata.get('layout_api_version') != LAYOUT_API_VERSION:
+            raise ValueError('layout API version changed; revalidate and freeze the strategy again')
+        if not {'layout.py', 'fonts/body.ttf', 'fonts/bold.ttf'} <= set(self.metadata['files_sha256']):
+            raise ValueError('frozen layout must fingerprint source and both fonts')
+        if self.metadata.get('fixed_decorations') != FIXED_DECORATIONS:
+            raise ValueError('frozen layout must preserve the fixed title and colored bars')
         for name, expected in self.metadata['files_sha256'].items():
             target = (self.directory / name).resolve()
             if not target.is_relative_to(self.directory) or digest(target) != expected:
                 raise ValueError('frozen layout asset changed: ' + name)
         cfg = dict(self.metadata['constraints'])
-        if cfg['font_path'] != 'fonts/body.ttf':
-            raise ValueError('frozen typography must reference its bundled font')
+        if cfg['font_path'] != 'fonts/body.ttf' or cfg.get('bold_font_path') != 'fonts/bold.ttf':
+            raise ValueError('frozen typography must reference its bundled fonts')
         cfg['font_path'] = str(self.directory / cfg['font_path'])
+        cfg['bold_font_path'] = str(self.directory / cfg['bold_font_path'])
         self.constraints = Constraints(**cfg)
         self.source = (self.directory / 'layout.py').read_text()
         validate_source(self.source)

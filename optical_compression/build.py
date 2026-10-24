@@ -1,10 +1,10 @@
-"""Build original compact CD pointwise SFT pairs and complete candidate groups."""
+"""Build DensePages and model records by calling already-selected layout code."""
 import argparse
 import hashlib
 import json
 from pathlib import Path
 from semantic_context.assets import load_validated_items, read_jsonl
-from .renderer import render_compact
+from .strategy import RenderStrategy, SELECTED
 
 SYSTEM = ('You are a music recommendation relevance model. Inspect the DensePage containing '
           'a user profile and one candidate item. A means Relevant and B means Not relevant. '
@@ -44,10 +44,12 @@ def main():
     source.add_argument('--samples', type=Path, help='Module-one semantic candidate JSONL')
     p.add_argument('--item-summaries', type=Path)
     p.add_argument('--output', type=Path, required=True)
-    p.add_argument('--layout', type=Path, help='Qualified frozen strategy directory; default uses original CD layout')
+    p.add_argument('--layout', type=Path, default=SELECTED,
+                   help='Already-selected layout directory: bundled selected/ or agent-exported frozen/')
     a = p.parse_args()
     if a.output.exists():
         raise FileExistsError(a.output)
+    strategy = RenderStrategy(a.layout)
     if a.samples:
         samples = read_jsonl(a.samples)
         if not samples or len({r['sample_id'] for r in samples}) != len(samples):
@@ -63,14 +65,8 @@ def main():
         pairs, complete, tasks = build(groups, load_validated_items(a.item_summaries), a.output)
         group_count = len(groups)
     a.output.mkdir(parents=True)
-    layout = 'compact640_font14'
-    if a.layout:
-        from .layout_engine import FrozenLayout
-        strategy = FrozenLayout(a.layout)
-        rendered = strategy.render_tasks(tasks)
-        layout = dict(kind='agent_top_bottom', signature=strategy.signature)
-    else:
-        rendered = [render_compact(t) for t in tasks]
+    rendered = strategy.render_tasks(tasks)
+    layout = dict(kind=strategy.kind, signature=strategy.signature)
     for name, records in [('sft_pairs', pairs), ('candidates', complete)]:
         (a.output / f'{name}.jsonl').write_text(''.join(json.dumps(r, ensure_ascii=False) + '\n' for r in records))
     (a.output / 'manifest.json').write_text(json.dumps(dict(groups=group_count, pairs=len(pairs),

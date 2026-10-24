@@ -5,6 +5,7 @@
   "output": "artifacts/zip4rec_cd_full",
   "asset_model": "gpt-4o",
   "asset_workers": 1,
+  "layout_strategy": "optical_compression/selected",
   "filtering": {"user_k": 10, "item_k": 15},
   "retrieval": {"device": "cuda", "epochs": 35, "validation_users": 1000, "test_users": 1000},
   "grpo_config": "configs/cd_lightgcn/grpo.json",

@@ -9,7 +9,7 @@ from pathlib import Path
 from semantic_context.assets import load_profiles, load_validated_items, read_jsonl
 from semantic_context.prepare import organize
 from optical_compression.build import build
-from optical_compression.renderer import render_compact
+from optical_compression.selected.compact import render_compact
 from ranking.evaluate import evaluate
 from ranking.rerank import rerank
 from workflow import digest
@@ -167,6 +167,12 @@ class PipelineTests(unittest.TestCase):
                 self.assertTrue(all(Path(r['densepage_path']).is_file() for r in records))
             complete = json.loads((p / 'dense/complete.json').read_text())
             self.assertFalse(complete['processor_validated'])
+            self.assertEqual(complete['layout_kind'], 'selected_compact')
+            self.assertIn('layout_signature', complete)
+            for split in ['train', 'valid', 'test']:
+                rendered = json.loads((p / f'dense/{split}/manifest.json').read_text())
+                self.assertEqual(rendered['layout']['kind'], 'selected_compact')
+                self.assertEqual(rendered['layout']['signature'], complete['layout_signature'])
 
 
 if __name__ == '__main__':

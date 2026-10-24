@@ -12,15 +12,21 @@ from PIL import Image
 
 from optical_compression.document import document, fingerprint, plain_text, select_examples
 from optical_compression.layout_engine import (Constraints, FrozenLayout, execute_layout,
-    render_plan, validate_source)
+    render_plan, validate_source, FIXED_DECORATIONS)
+from optical_compression.selected.compact import render_compact
+from optical_compression.presentation import prepare_document
 from optical_compression.measurement import reading_result
 from optical_compression.optimizer.agent import ChatClient, TOOLS, run_agent
 from optical_compression.optimizer.tools import LayoutSession
+from optical_compression.strategy import RenderStrategy, SELECTED
+from run_pipeline import select_layout
+from workflow import Workflow
 from workflow import digest
 
 ROOT = Path(__file__).resolve().parents[1]
 INITIAL = (ROOT / 'optical_compression/layouts/initial.py').read_text()
 PACKED = INITIAL.replace('max(640,', 'max(480,').replace('pack=False', 'pack=True').replace("'line_gap': 4", "'line_gap': 1")
+COMPACT_EQUIVALENT = (ROOT / 'tests/fixtures/compact_equivalent.py').read_text()
 
 
 def examples():
@@ -66,6 +72,199 @@ def provide_readings(session, cid):
 class LayoutOptimizerTests(unittest.TestCase):
     def session(self, directory, **kwargs):
         return LayoutSession(examples(), Constraints(), FakeMeter(), FakeReader(), directory, **kwargs)
+
+    def test_bundled_selected_compact_is_explicit_and_renders_without_agent_imports(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            script = '''import sys
+from optical_compression.strategy import RenderStrategy
+strategy = RenderStrategy()
+assert strategy.kind == 'selected_compact'
+assert strategy.metadata['status'] == 'selected'
+assert strategy.metadata['source'] == 'compact.py'
+assert strategy.metadata['entrypoint'] == 'render_compact'
+strategy.render_tasks([dict(sample_id='one', profile='Interests: Jazz',
+    item=dict(title='Album', artists=['A'], genres=['Jazz'], era='1990s', moods=['Calm'],
+              summary='A description.'), path=sys.argv[1])])
+assert 'optical_compression.optimizer.agent' not in sys.modules
+assert 'optical_compression.measurement' not in sys.modules
+assert 'httpx' not in sys.modules
+'''
+            with mock.patch.dict('os.environ', {}, clear=True):
+                subprocess.run([sys.executable, '-c', script, str(root / 'image.png')],
+                               cwd=ROOT, check=True, capture_output=True, text=True)
+            with Image.open(root / 'image.png') as image:
+                self.assertEqual(image.width, 640)
+                self.assertEqual(image.height % 32, 0)
+            workflow = mock.Mock()
+            strategy = select_layout(dict(layout_strategy=str(SELECTED)), workflow, root, root / 'model')
+            self.assertEqual(strategy.kind, 'selected_compact')
+            workflow.run.assert_not_called()
+            with self.assertRaisesRegex(ValueError, 'not both'):
+                select_layout(dict(layout_strategy=str(SELECTED), layout_optimizer_config='config.json'),
+                              workflow, root, root / 'model')
+
+    def test_full_pipeline_selects_from_train_once_then_reuses_frozen_code(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            session = self.session(root / 'seed', readability_threshold=None)
+            cid = session.revise_layout(PACKED, 'offline strategy')['candidate_id']
+            session.render_and_measure(cid)
+            frozen = session.freeze({})
+            workflow = Workflow(root / 'full', dict(mode='agent'))
+            datasets, model = root / 'datasets', root / 'model'
+            config = dict(layout_optimizer_config='configs/cd_lightgcn/layout_optimizer.json')
+            commands = []
+            def launch(command, check):
+                commands.append(command)
+                self.assertTrue(check)
+                self.assertEqual(command[1:3], ['-m', 'optical_compression.optimize'])
+                self.assertEqual(command[command.index('--samples') + 1],
+                                 str(datasets / 'train_candidates.jsonl'))
+                self.assertEqual(command[command.index('--model') + 1], str(model))
+                target = Path(command[command.index('--output') + 1]) / 'frozen'
+                shutil.copytree(frozen, target)
+                return subprocess.CompletedProcess(command, 0)
+            with mock.patch('workflow.subprocess.run', side_effect=launch):
+                first = select_layout(config, workflow, datasets, model)
+                second = select_layout(config, workflow, datasets, model)
+            self.assertEqual(len(commands), 1)
+            self.assertEqual(first.kind, 'agent_top_bottom')
+            self.assertEqual(first.signature, second.signature)
+            self.assertTrue(first.requires_compression_check)
+            self.assertEqual(first.directory, root / 'full/layout_search/frozen')
+            # Completed search output cannot be swapped for unverified source.
+            (first.directory / 'layout.py').write_text(INITIAL)
+            with self.assertRaisesRegex(ValueError, 'asset changed'):
+                select_layout(config, workflow, datasets, model)
+
+    def test_compact_is_expressible_with_byte_identical_images(self):
+        profiles = [
+            'Preference summary: Guitar music.\nPreferred eras: 1990s\nMoods/styles: Calm\n'
+            'Diversity: varied\nEvidence strength: strong\nUncertainties: None\nR1: Album.',
+            'Preference summary: ' + 'Jazz and acoustic music. ' * 35,
+            'Interests: Music\nPreferred eras: 1980s\nUnrelated: Other evidence\nMoods/styles: Gentle',
+        ]
+        cfg = Constraints()
+        with tempfile.TemporaryDirectory() as folder:
+            for index, profile in enumerate(profiles):
+                task = dict(sample_id=str(index), profile=profile,
+                    item=dict(title='Title: an album', artists=['A', 'B'] if index != 2 else [],
+                              genres=['Folk', 'Pop'], era='1990s' if index != 2 else '',
+                              moods=['Calm', 'Warm'] if index != 2 else [],
+                              summary='A detailed summary. ' * (index + 1)))
+                doc = document(task['profile'], task['item'])
+                plan = execute_layout(COMPACT_EQUIVALENT, [doc], cfg)[0]
+                original, expressed = Path(folder) / 'old.png', Path(folder) / 'new.png'
+                render_compact(dict(task, path=original))
+                render_plan(doc, plan, cfg, expressed)
+                with self.subTest(index=index):
+                    self.assertEqual(original.read_bytes(), expressed.read_bytes())
+                    with Image.open(expressed) as image:
+                        self.assertEqual(image.height % 32, 0)
+
+    def test_presentation_is_generic_and_cannot_remove_duplicate_or_replace_values(self):
+        doc = document('First line\nSecond line',
+                       dict(authors=['Ada', 'Lin'], tags=['Science', 'Travel'], year=2025))
+        untouched = json.loads(json.dumps(doc))
+        rules = dict(user=[dict(ids=['u0', 'u1'], separator=' • ')], item=[
+            dict(groups=[dict(ids=['i0'], label='Written by', list_separator=', '),
+                         dict(ids=['i1', 'i2'], label='Topics / year', separator=' / ',
+                              list_separator=', ')], separator=' • ')])
+        prepared = prepare_document(doc, rules)
+        self.assertEqual(prepared['user'][0]['text'], 'First line • Second line')
+        self.assertEqual(prepared['item'][0]['text'],
+                         'Written by: Ada, Lin • Topics / year: Science, Travel / 2025')
+        self.assertEqual(doc, untouched)
+        for bad in [dict(item=[dict(ids=['i0'])]),
+                    dict(item=[dict(ids=['i0', 'i0', 'i1', 'i2'], label='All')]),
+                    dict(item=[dict(ids=['i0', 'i1', 'i2'], label='All', text='Changed')]),
+                    dict(item=[dict(ids=['i0', 'i1', 'i2'], label='')]),
+                    dict(user=[dict(ids=['u0', 'u1'], separator='\u200b')]),
+                    dict(item=[dict(ids=['i0', 'i1', 'i2'], label='All', empty_value='Replacement')])]:
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                prepare_document(doc, bad)
+        source = document('Context', dict(notes=['', 'Must remain'], extra=[]))
+        formatted = prepare_document(source, dict(item=[dict(ids=['i0', 'i1'], label='Notes',
+                                     skip_empty=True, empty_value='')]))
+        self.assertIn('Must remain', formatted['item'][0]['text'])
+
+    def test_independent_margins_line_height_and_rounding_enforce_geometry(self):
+        doc = document('Upper: ' + 'gjpqXYZ words ' * 35, dict(notes='Lower text. ' * 12))
+        cfg = Constraints()
+        plan = execute_layout(INITIAL, [doc], cfg)[0]
+        plan.update(margins=dict(left=10, right=20, top=12, bottom=25), line_height=16,
+                    line_gap=0, text_anchor='la', text_origin='font', height_multiple=32)
+        with tempfile.TemporaryDirectory() as folder:
+            output = Path(folder) / 'image.png'
+            result = render_plan(doc, plan, cfg, output)
+            self.assertEqual(result['height'] % 32, 0)
+            for bad in [dict(line_height=1), dict(text_anchor='invalid'), dict(height_multiple=0),
+                        dict(margins=dict(left=1, right=20, top=12, bottom=25)),
+                        dict(margins=dict(left=10, right=20, top=12))]:
+                with self.subTest(bad=bad), self.assertRaises(ValueError):
+                    render_plan(doc, dict(plan, **bad), cfg, output)
+            # Validation applies after upward rounding, not just before it.
+            unrounded = render_plan(doc, dict(plan, height_multiple=1), cfg, output)
+            limited = Constraints(max_height=unrounded['height'])
+            with self.assertRaisesRegex(ValueError, 'canvas limits'):
+                render_plan(doc, dict(plan, height_multiple=256), limited, output)
+
+    def test_formatted_strategy_freezes_and_replays_with_displayed_readback_truth(self):
+        profile = 'Preferred eras: 1980s\nMoods/styles: Calm\nEvidence strength: strong'
+        item = dict(title='A title', artists=['One', 'Two'], genres=['Pop'], era='1980s',
+                    moods=['Calm'], summary='All values must survive.')
+        doc = document(profile, item)
+        inputs = [dict(id='example_01', document=doc, document_sha256=fingerprint(doc))]
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            session = LayoutSession(inputs, Constraints(), FakeMeter(), FakeReader(), root / 'search')
+            self.assertEqual(session.candidates, {})
+            self.assertNotEqual(session.initial_source, COMPACT_EQUIVALENT)
+            cid = session.revise_layout(COMPACT_EQUIVALENT, 'coverage proof')['candidate_id']
+            report = session.render_and_measure(cid)
+            self.assertTrue(report['geometry_valid'])
+            provide_readings(session, cid)
+            self.assertTrue(session.check_readability(cid)['qualified'])
+            frozen = FrozenLayout(session.freeze({}))
+            replay = root / 'replay.png'
+            frozen.render_tasks([dict(sample_id='new', profile=profile, item=item, path=replay)])
+            self.assertEqual(digest(replay), report['records'][0]['image_sha256'])
+            original = root / 'original.png'
+            render_compact(dict(sample_id='new', profile=profile, item=item, path=original))
+            self.assertEqual(original.read_bytes(), replay.read_bytes())
+            # Even if a candidate computes spans from forged metadata, the trusted
+            # renderer reconstructs the original values and rejects their removal.
+            plan = execute_layout(COMPACT_EQUIVALENT, [doc], Constraints())[0]
+            plan['presentation']['item'][1]['groups'].pop()
+            with self.assertRaisesRegex(ValueError, 'every source field'):
+                render_plan(doc, plan, Constraints(), replay)
+
+    def test_fixed_title_and_colored_bars_match_original_compact(self):
+        cfg = Constraints()
+        task = dict(sample_id='style', profile='Music', item=dict(title='Album', artists=['A'],
+                    genres=['Pop'], era='1990s', moods=['Calm'], summary='Description'))
+        doc = document(task['profile'], task['item'])
+        plan = execute_layout(INITIAL, [doc], cfg)[0]
+        plan['padding'] = 10
+        with tempfile.TemporaryDirectory() as folder:
+            baseline = Path(folder) / 'compact.png'
+            actual = Path(folder) / 'candidate.png'
+            render_compact(dict(task, path=baseline))
+            render_plan(doc, plan, cfg, actual)
+            with Image.open(baseline) as old, Image.open(actual) as new:
+                # Same title, typeface, placement, blue bar and bold heading.
+                self.assertEqual(old.crop((4, 4, 637, 56)).tobytes(),
+                                 new.crop((4, 4, 637, 56)).tobytes())
+                colors = {color for count, color in new.getcolors(new.width * new.height)}
+                self.assertIn((220, 252, 231), colors)
+                self.assertIn((22, 101, 52), colors)
+            for override in [dict(page_title=''), dict(user_bar=None), dict(title_size=1)]:
+                with self.subTest(override=override), self.assertRaisesRegex(ValueError, 'plan keys'):
+                    render_plan(doc, dict(plan, **override), cfg, actual)
+            plan['width'] = 256
+            with self.assertRaisesRegex(ValueError, 'fixed title or heading exceeds'):
+                render_plan(doc, plan, cfg, actual)
 
     def test_general_code_preserves_long_words_and_top_bottom_sections(self):
         doc = document('Interests: ' + 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' * 15,
@@ -216,9 +415,17 @@ class LayoutOptimizerTests(unittest.TestCase):
             portable = root / 'portable'
             shutil.copytree(frozen, portable)
             strategy = FrozenLayout(portable)
+            self.assertEqual(strategy.metadata['fixed_decorations'], FIXED_DECORATIONS)
+            self.assertEqual(Path(strategy.constraints.bold_font_path).parent, portable / 'fonts')
             task = dict(sample_id='new', profile='New user context', item={'title': 'A new album'}, path=root / 'new.png')
             self.assertEqual(len(strategy.render_tasks([task])), 1)
             self.assertTrue((root / 'new.png').is_file())
+            bold = portable / 'fonts/bold.ttf'
+            saved_bold = bold.read_bytes()
+            bold.write_bytes(b'changed')
+            with self.assertRaisesRegex(ValueError, 'asset changed'):
+                FrozenLayout(portable)
+            bold.write_bytes(saved_bold)
             (portable / 'layout.py').write_text(INITIAL)
             with self.assertRaisesRegex(ValueError, 'asset changed'):
                 FrozenLayout(portable)

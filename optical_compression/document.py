@@ -25,7 +25,10 @@ def document(profile, item):
         raise ValueError('expect a user-context string and a nonempty item object')
     user = [dict(id=f'u{i}', text=normalize(line))
             for i, line in enumerate(profile.splitlines()) if normalize(line)]
-    fields = [dict(id=f'i{i}', text=normalize(key.replace('_', ' ').title() + ': ' + value_text(value)))
+    fields = [dict(id=f'i{i}', key=key, label=key.replace('_', ' ').title(),
+                   values=[normalize(value_text(v)) for v in value] if isinstance(value, list)
+                          else [normalize(value_text(value))],
+                   text=normalize(key.replace('_', ' ').title() + ': ' + value_text(value)))
               for i, (key, value) in enumerate(item.items())]
     if not user:
         raise ValueError('empty user context')

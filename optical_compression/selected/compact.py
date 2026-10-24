@@ -1,4 +1,4 @@
-"""Original CD compact renderer; model processor determines actual token counts."""
+"""Selected CD compact strategy for published experiment reproduction; no agent calls."""
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -8,7 +8,7 @@ from PIL import Image, ImageDraw, ImageFont
 @lru_cache(maxsize=16)
 def font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont:
     name = "DejaVuSans-Bold.ttf" if bold else "DejaVuSans.ttf"
-    return ImageFont.truetype(str(Path(__file__).parent / "fonts" / name), size)
+    return ImageFont.truetype(str(Path(__file__).parents[1] / "fonts" / name), size)
 
 
 def wrapped(draw: ImageDraw.ImageDraw, value: str, fnt: ImageFont.FreeTypeFont, width: int) -> list[str]:

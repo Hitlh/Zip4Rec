@@ -10,7 +10,8 @@ import platform
 
 from workflow import digest
 from ..document import fingerprint
-from ..layout_engine import execute_layout, render_plan, validate_source, engine_hashes, supported_glyph
+from ..layout_engine import (execute_layout, render_plan, validate_source, engine_hashes,
+                            supported_glyph, FIXED_DECORATIONS, LAYOUT_API_VERSION)
 from ..measurement import reading_result
 
 
@@ -57,8 +58,10 @@ class LayoutSession:
         if text_token_limits is not None and text_token_limits != self.baselines:
             raise ValueError('provided pure-text counts differ from the actual same-protocol processor counts')
         self.initialization = dict(examples=examples, constraints=asdict(constraints),
+            layout_api_version=LAYOUT_API_VERSION,
             initial_source_sha256=fingerprint(self.initial_source),
-            font_sha256=digest(constraints.font_path), processor=meter.identity,
+            font_sha256=digest(constraints.font_path), bold_font_sha256=digest(constraints.bold_font_path),
+            fixed_decorations=FIXED_DECORATIONS.copy(), processor=meter.identity,
             text_token_limits=self.baselines, max_length=max_length,
             readability_mode='threshold' if self.threshold is not None else (
                 'diagnostic_only' if reader is not None else 'disabled'),
@@ -180,14 +183,20 @@ class LayoutSession:
         (target / 'layout.py').write_text(candidate['source'])
         (target / 'fonts').mkdir()
         shutil.copyfile(self.constraints.font_path, target / 'fonts/body.ttf')
-        license_path = Path(self.constraints.font_path).parent / 'LICENSE.txt'
-        if license_path.is_file():
-            shutil.copyfile(license_path, target / 'fonts/LICENSE.txt')
+        shutil.copyfile(self.constraints.bold_font_path, target / 'fonts/bold.ttf')
+        for font_path, name in [(self.constraints.font_path, 'LICENSE.txt'),
+                                (self.constraints.bold_font_path, 'bold-LICENSE.txt')]:
+            license_path = Path(font_path).parent / 'LICENSE.txt'
+            if license_path.is_file():
+                shutil.copyfile(license_path, target / 'fonts' / name)
         cfg = asdict(self.constraints)
         cfg['font_path'] = 'fonts/body.ttf'
+        cfg['bold_font_path'] = 'fonts/bold.ttf'
         files = {str(p.relative_to(target)): digest(p) for p in sorted(target.rglob('*')) if p.is_file()}
         write_json(target / 'layout.json', dict(format='zip4rec-top-bottom-v1', qualified=True,
-            constraints=cfg, files_sha256=files, engine_sha256=engine_hashes(),
+            layout_api_version=LAYOUT_API_VERSION,
+            constraints=cfg, fixed_decorations=FIXED_DECORATIONS.copy(),
+            files_sha256=files, engine_sha256=engine_hashes(),
             evaluation_limits=dict(max_length=self.max_length,
                                    readability_mode='threshold' if self.threshold is not None else 'diagnostic_only',
                                    readability_threshold=self.threshold,

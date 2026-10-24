@@ -10,6 +10,7 @@
   "constraints": {
     "font_size": 14,
     "heading_size": 15,
+    "title_size": 18,
     "min_width": 256,
     "max_width": 1536,
     "max_height": 16384,

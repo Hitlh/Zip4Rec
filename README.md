@@ -9,7 +9,7 @@ Zip4Rec 是面向推荐重排序的视觉语言模型框架：将用户历史语
 | 模块 | 目录 | 实现内容 |
 | --- | --- | --- |
 | 数据与历史语义 | [`semantic_context/`](semantic_context/) | 筛选、去重、k-core、时间目标与自然候选、物品描述、用户画像、三类数据集和正负配对 |
-| 光学压缩 | [`optical_compression/`](optical_compression/) | 用户与单候选语义排版、动态尺寸 PNG、图文输入和实际 processor token 检查 |
+| 光学压缩 | [`optical_compression/`](optical_compression/) | 一次性 agent 排版选择、固定代码批量渲染、图文输入和实际 processor token 检查 |
 | 推荐重排序 | [`ranking/`](ranking/) | 语言 LoRA 的 SFT、GRPO、验证集选择、固定模型评分、融合排序和指标计算 |
 
 ```text
@@ -17,7 +17,8 @@ Zip4Rec 是面向推荐重排序的视觉语言模型框架：将用户历史语
   → 筛选、去重与 k-core
   → 冻结验证/测试用户组和时间目标，生成 LightGCN 自然 Top-10
   → 提取物品语义、历史用户画像，构造训练/验证/测试样本
-  → DensePage 渲染和图文输入编码
+  → agent 选择并冻结排版代码（已有选中代码可直接复用）
+  → 单独调用选中代码，批量生成 DensePage 和图文输入
   → SFT → 验证选择 → GRPO → 验证选择
   → 锁定模型和融合系数 → 测试评分、排序与评估
 ```
@@ -53,7 +54,9 @@ python -m pip install -r requirements.txt
 
 GPU 训练限定单张可见 CUDA 设备，要求支持 BF16。字体和字体许可随 `optical_compression/fonts/` 提供，以固定页面排版。
 
-新数据集可先用十条真实训练样本运行 [视觉排版优化 agent](optical_compression/optimizer/README.md)，在固定上下分区、字体和字号下搜索排版代码。满足真实 token、内容和配置的转写约束，并经 agent 看图后导出固定策略，第二阶段用 `--layout` 加载；转写门槛默认 90%，可设为 null 关闭，原 CD renderer 仍是默认基线。
+模块二采用“先选择一次、后固定调用”的逻辑：新数据集从十条真实训练样本运行 [视觉排版 agent](optical_compression/optimizer/README.md)，兼顾训练可识别性与 token 成本，导出选中的 `frozen/layout.py`、字体和清单；后续生成 train/valid/test 图片时只调用选中代码，不再请求 agent。上下分区、大标题、蓝绿分区栏和字体字号固定，回读门槛默认 90%。
+
+当前仓库单独保留项目选定的 [`selected/compact.py`](optical_compression/selected/compact.py)，并通过 [选择清单](optical_compression/selected/selection.json) 标注。后续直接调用这个选中代码进行批量渲染。
 
 ## 数据与基座
 
@@ -61,7 +64,7 @@ GPU 训练限定单张可见 CUDA 设备，要求支持 BF16。字体和字体�
 - 将 [Qwen3-VL-8B-Instruct](https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct) 的权重、tokenizer 和 processor 下载到本地模型目录。
 - 配置用于物品描述和用户画像生成的服务。参考生成模型为 `gpt-4o`，模型名称可在配置中设置。
 
-默认路径和参数见 [`configs/cd_lightgcn/pipeline.json`](configs/cd_lightgcn/pipeline.json)。数据和权重不随本仓库发布。
+已选 compact 的复现参数见 [`pipeline.json`](configs/cd_lightgcn/pipeline.json)，新数据集先搜索再渲染的参数见 [`pipeline_agent.json`](configs/cd_lightgcn/pipeline_agent.json)。数据和权重不随本仓库发布。
 
 ## 完整运行
 
@@ -70,6 +73,10 @@ GPU 训练限定单张可见 CUDA 设备，要求支持 BF16。字体和字体�
 ```bash
 export CUDA_VISIBLE_DEVICES=0
 export OPENAI_BASE_URL='https://api.openai.com/v1'
+# 新数据集：语义准备 → agent 选择 → 固定代码渲染 → 训练与评估。
+python run_pipeline.py --config configs/cd_lightgcn/pipeline_agent.json
+
+# 原 CD 复现：复用仓库已选的 compact，直接渲染和训练。
 python run_pipeline.py --config configs/cd_lightgcn/pipeline.json
 ```
 
@@ -78,9 +85,10 @@ python run_pipeline.py --config configs/cd_lightgcn/pipeline.json
 主要输出：
 
 ```text
-artifacts/zip4rec_cd_full/
+artifacts/<本次运行>/
 ├── semantic/       # 数据处理、语义生成请求/响应、画像和数据划分
-├── densepage/      # 三类页面、模型输入、实际 token 统计
+├── layout_search/  # 选择模式产生；搜索记录和 frozen/ 选中代码
+├── densepage/      # 固定代码生成的三类页面、模型输入、实际 token 统计
 └── ranking/
     ├── sft/        # 本次 SFT 权重和检查点
     ├── grpo/       # GRPO 协议、参考缓存和训练权重
