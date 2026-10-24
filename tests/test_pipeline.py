@@ -2,6 +2,8 @@ import copy
 import json
 import math
 import tempfile
+import subprocess
+import sys
 import unittest
 from pathlib import Path
 from semantic_context.assets import load_profiles, load_validated_items, read_jsonl
@@ -10,6 +12,8 @@ from optical_compression.build import build
 from optical_compression.renderer import render_compact
 from ranking.evaluate import evaluate
 from ranking.rerank import rerank
+from workflow import digest
+from semantic_context.samples import pointwise
 
 ROOT = Path(__file__).resolve().parents[1]
 EXAMPLES = ROOT / 'examples/cd_lightgcn'
@@ -76,6 +80,59 @@ class PipelineTests(unittest.TestCase):
         scores[0]['sample_id'] = scores[1]['sample_id']
         with self.assertRaises(ValueError):
             evaluate(scores)
+
+    def test_freeze_accepts_earlier_same_user_events_but_rejects_holdout(self):
+        with tempfile.TemporaryDirectory() as folder:
+            p = Path(folder)
+            (p / 'base').mkdir()
+            (p / 'base/config.json').write_text('{}')
+            (p / 'adapter').mkdir()
+            (p / 'adapter/adapter_model.safetensors').write_bytes(b'fixture')
+            def group(split, offset, positive):
+                return [dict(sample_id=f'{split}-{i}', group_id=split, user_id='shared-user',
+                    split=split, candidate_item_id=f'item{offset+i}', target_item_id=f'item{positive}',
+                    candidate_score=10-i, label='A' if offset+i == positive else 'B',
+                    _replay=(offset+i in [positive, positive+1]), _replay_weight=1.) for i in range(10)]
+            train, valid = group('train', 0, 2), group('valid', 20, 20)
+            def write(name, rows):
+                (p / name).write_text(''.join(json.dumps(r) + '\n' for r in rows))
+            write('train.jsonl', train)
+            write('valid.jsonl', valid)
+            command = [sys.executable, '-m', 'ranking.make_run', '--config', str(EXAMPLES / 'grpo.json'),
+                       '--base-model', str(p / 'base'), '--initial-adapter', str(p / 'adapter'),
+                       '--train', str(p / 'train.jsonl'), '--valid', str(p / 'valid.jsonl'), '--output']
+            subprocess.run(command + [str(p / 'ok')], cwd=ROOT, check=True, capture_output=True, text=True)
+            train[0]['candidate_item_id'] = 'item20'
+            write('train.jsonl', train)
+            failed = subprocess.run(command + [str(p / 'bad')], cwd=ROOT, capture_output=True, text=True)
+            self.assertNotEqual(failed.returncode, 0)
+            self.assertIn('held-out validation positive', failed.stderr)
+
+    def test_all_splits_render_from_semantic_samples_and_resume(self):
+        with tempfile.TemporaryDirectory() as folder:
+            p = Path(folder)
+            datasets = p / 'datasets'
+            datasets.mkdir()
+            manifest = dict(output_sha256={}, splits={})
+            for split in ['train', 'valid', 'test']:
+                group = read_jsonl(EXAMPLES / f'{split}_groups.jsonl')[0]
+                context = organize(group, self.profiles, self.items)
+                _, samples = pointwise([context], self.items)
+                path = datasets / f'{split}_candidates.jsonl'
+                path.write_text(''.join(json.dumps(r) + '\n' for r in samples))
+                manifest['output_sha256'][path.name] = digest(path)
+                manifest['splits'][split] = dict(all_groups=1, natural_hit_groups=1)
+            (datasets / 'manifest.json').write_text(json.dumps(manifest))
+            command = [sys.executable, '-m', 'optical_compression.pipeline', '--datasets',
+                       str(datasets), '--output', str(p / 'dense')]
+            for _ in range(2):
+                subprocess.run(command, cwd=ROOT, check=True, capture_output=True, text=True)
+            for split in ['train', 'valid', 'test']:
+                records = read_jsonl(p / f'dense/{split}/candidates.jsonl')
+                self.assertEqual(len(records), 10)
+                self.assertTrue(all(Path(r['densepage_path']).is_file() for r in records))
+            complete = json.loads((p / 'dense/complete.json').read_text())
+            self.assertFalse(complete['processor_validated'])
 
 
 if __name__ == '__main__':

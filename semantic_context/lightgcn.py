@@ -639,8 +639,8 @@ def main() -> int:
     for row in sft_rows:
         sft_by_user[row["user_id"]].append(row)
     checks = {
-        "validation_users_1000": len(validation) == 1000,
-        "test_users_1000": len(test) == 1000,
+        "validation_users_match_configuration": len(validation) == args.validation_users,
+        "test_users_match_configuration": len(test) == args.test_users,
         "validation_test_user_disjoint": validation.isdisjoint(test),
         "evaluation_targets_are_last_interactions": all(
             target == grouped[user_id][-1] for user_id, target in evaluation_targets.items()
@@ -650,7 +650,7 @@ def main() -> int:
             all(row["target_timestamp"] < evaluation_targets[user_id].timestamp for row in sft_by_user[user_id])
             for user_id in validation | test
         ),
-        "sft_rows_9522": len(sft_rows) == 9522,
+        "sft_rows_match_configured_targets": len(sft_rows) == len(grouped) * args.sft_targets_per_user,
         "ten_unique_candidates_everywhere": all(
             len(row["candidate_item_ids"]) == 10 and len(set(row["candidate_item_ids"])) == 10
             for row in [*sft_rows, *eval_rows]
@@ -681,7 +681,9 @@ def main() -> int:
             and set(row["lightgcn_top5_item_ids"]).issubset(row["candidate_item_ids"])
             for row in eval_rows
         ),
-        "profile_contexts_cover_frozen_test_without_scoring": len(profile_contexts) == 11522,
+        "profile_contexts_cover_frozen_test_without_scoring": all(
+            history_payload(visible_history[user])["profile_history_key"] in profile_contexts
+            for user in validation | test),
     }
     if not all(checks.values()):
         raise RuntimeError(f"protocol audit failed: {[key for key, value in checks.items() if not value]}")

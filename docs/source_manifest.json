@@ -46,5 +46,33 @@
   {
     "source": "amazon2023_user_disjoint_protocol.py",
     "source_sha256": "a4243da3604d40c546715b27bcef44382548bf944343e3f5b600301c56d0e660"
+  },
+  {
+    "source": "amazon2023_native10_delta_full_repro_20260805/dataprocess/amazonmusic/raw_preprocessing/evaluate_amazon2023_description_lightgcn.py",
+    "source_sha256": "3337fd3da32bb1fea27d8cd261daf8373e9e5b6ff771ebe48cefdf79c740c734"
+  },
+  {
+    "source": "amazon2023_native10_delta_full_repro_20260805/dataprocess/amazonmusic/raw_preprocessing/prepare_amazon2023_description_kcore.py",
+    "source_sha256": "ecc9f6fa35bbbfec29bb3869ccbd857b8a379e3b6dcb0e6c2f14cfcca97c8161"
+  },
+  {
+    "source": "amazon2023_native10_delta_full_repro_20260805/dataprocess/amazonmusic/raw_preprocessing/extract_amazon2023_kcore_metadata.py",
+    "source_sha256": "3367d8d5447dcdad77b4a9aacfd6bdb50b6c3a58ffe1668c68a0f66c88ace7f2"
+  },
+  {
+    "source": "amazon2023_native10_delta_full_repro_20260805/dataprocess/amazonmusic/llm_profile_common.py",
+    "source_sha256": "e52052ee9f03e5befe4be92af3c4eec47082483550a0f94e62cfb5957768c13e"
+  },
+  {
+    "source": "amazon2023_native10_delta_full_repro_20260805/dataprocess/amazonmusic/prepare_llm_profile_assets.py",
+    "source_sha256": "0d85db5dc62108d76a2c6f1fddc5133292cce9ab95bca0489319c2d244bae77d"
+  },
+  {
+    "source": "RecRankerEval/RecRankerEval/dataprocess/amazonmusic/run_openai_compatible_requests.py",
+    "source_sha256": "f0c8c1dbeb5ced88e73f28a76ac4ed5f1a3e503232ae7d117b54803e50962723"
+  },
+  {
+    "source": "baseline/strict_temporal/build_lightgcn_strict.py",
+    "source_sha256": "e357ce85e8cfd2cdf6bcd0f45d28474743a1d5e92591ce9cf3a3e193893cebdf"
   }
 ]

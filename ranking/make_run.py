@@ -36,8 +36,16 @@ def main():
         raise ValueError('training input must declare split=train')
     if any(r.get('split') not in ['valid', 'validation'] for r in valid):
         raise ValueError('validation input must declare split=valid or validation')
-    if set(tg) & set(vg) or {r['user_id'] for r in train} & {r['user_id'] for r in valid}:
-        raise ValueError('user-disjoint train/validation protocol violated')
+    if set(tg) & set(vg):
+        raise ValueError('training and validation request IDs overlap')
+    # The original CD protocol reuses earlier events from evaluation users for SFT.
+    # Its disjoint cohorts are validation vs. test; the held-out events must stay unseen.
+    heldout = {}
+    for row in valid:
+        heldout.setdefault(row['user_id'], set()).add(row['target_item_id'])
+    for row in train:
+        if (set(row.get('history_item_ids', [])) | {row['candidate_item_id'], row['target_item_id']}) & heldout.get(row['user_id'], set()):
+            raise ValueError('held-out validation positive appears in training')
     adapter = a.initial_adapter.resolve()
     adapter_sha = digest(adapter / 'adapter_model.safetensors')
     if not (a.base_model / 'config.json').is_file():

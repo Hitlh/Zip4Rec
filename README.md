@@ -25,6 +25,32 @@
 
 Zip4Rec 接收基础推荐模型生成的候选集合，对集合内物品重新排序；候选生成仍由基础推荐模型完成。
 
+## 从原始数据运行完整项目
+
+完整流程包含三个模块的实际实现，统一入口会从原始数据依次生成物品语义和用户画像、三个划分的 DensePage、全新 SFT 适配器与 GRPO 检查点，再使用验证集选择模型并输出锁定模型的测试结果。
+
+```text
+原始 reviews + metadata
+  → 筛选 / 去重 / k-core / 时间目标与自然候选
+  → 物品描述提取 / 历史用户画像 / 语义训练配对与验证测试集
+  → DensePage 排版渲染 / 图文输入 / 实际 processor 长度检查
+  → 从基座新建 LoRA 做 SFT / 验证集选择
+  → 从选中 SFT 开始 GRPO / 验证集选择
+  → 锁定检查点与融合系数 / 测试评分 / 排序指标与逐用户结果
+```
+
+1. 准备 Amazon CD 原始 reviews / metadata、本地 Qwen3-VL-8B-Instruct 基座，以及语义生成服务的环境变量。
+2. 在 `examples/cd_lightgcn/pipeline.json` 中设置输入路径、输出目录和生成模型。
+3. 从仓库根目录执行：
+
+```bash
+python -m pip install -r requirements.txt
+export CUDA_VISIBLE_DEVICES=0
+python run_pipeline.py --config examples/cd_lightgcn/pipeline.json
+```
+
+完整输入说明与阶段命令见 [CD / LightGCN 示例](examples/cd_lightgcn/README.md)。训练图像、语义资产、参考 logits、SFT/GRPO 检查点和评分均由这次运行生成；无需预先准备历史实验适配器或分数。基础预训练模型与原始数据需由运行者提供。完整 Qwen GPU 训练未在本次仓库整理中重跑，验证边界见 [核验记录](docs/VALIDATION.md)。
+
 ## 研究动机
 
 ### 长历史上下文的 token 开销
@@ -425,17 +451,17 @@ $$
 
 | 模块 | 目录 | 职责 |
 | --- | --- | --- |
-| 历史语义整理 | [`semantic_context/`](semantic_context/) | 离线物品语义、用户画像、近期历史与自然候选协议 |
+| 数据准备与历史语义 | [`semantic_context/`](semantic_context/) | 原始筛选、物品描述与用户画像提取、自然候选、训练/验证/测试集 |
 | 历史信息光学压缩 | [`optical_compression/`](optical_compression/) | 将用户上下文与单候选渲染为紧凑 DensePage |
 | 推荐重排序 | [`ranking/`](ranking/) | A/B 增量 SFT、GRPO、固定模型评分、融合与评估 |
 
-先阅读 [CD / LightGCN 运行示例](examples/cd_lightgcn/README.md)，再阅读各模块说明。
+从原始数据开始，请先阅读 [模块一完整数据准备流程](semantic_context/README.md)。已有数据时可直接阅读 [CD / LightGCN 训练与评估示例](examples/cd_lightgcn/README.md)。
 [代码来源与整理范围](docs/PROVENANCE.md)记录原始实验实现与迁移改动，
 [来源哈希](docs/source_manifest.json)用于核对原始文件。
 
 ```text
 Zip4Rec/
-├── semantic_context/       # 模块一：历史语义与上游 LightGCN
+├── semantic_context/       # 模块一：原始数据 → 语义资产 → train/valid/test
 ├── optical_compression/    # 模块二：DensePage 渲染与样本构建
 ├── ranking/                # 模块三：SFT → GRPO → 评分 → 融合评估
 ├── examples/cd_lightgcn/   # 配置、合成小样例与历史结果
