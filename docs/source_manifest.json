@@ -1,0 +1,50 @@
+[
+  {
+    "source": "outputs/cd_lightgcn_history_L_20261023/code/original_renderer.py",
+    "source_sha256": "6ce39a235365532856bbcaf0525e70583b45dbbe6e633b82bdc0a13b2c58558e"
+  },
+  {
+    "source": "condition_pointwise_experiment/train_condition_pointwise.py",
+    "source_sha256": "dc9838e353424f2fe385cfee2396fd98ef7d83f77e2cce61b5ac2e88a2cbf78d"
+  },
+  {
+    "source": "amazon2023_native10_delta_full_repro_20260805/densepage_code/scripts/qwen3vl_densepage_common_fixedlabels.py",
+    "source_sha256": "ab34f94d27c5c0f18bf21b64fcd0abe02bf12b54de32a3c0a0586ac36afdd0e9"
+  },
+  {
+    "source": "amazon2023_native10_delta_full_repro_20260805/densepage_code/scripts/train_qwen3vl_densepage_native10.py",
+    "source_sha256": "2ccd66dd7a9a5f14b33f9ad67cf1bcb8c26d9f3e13cff84c2be2a848fa3c528b"
+  },
+  {
+    "source": "condition_pointwise_experiment/cd_lightgcn_grpo_k_20261022/code/policy.py",
+    "source_sha256": "8581c9e13c8ec5e3c5224d1c6ecd1609adb419d49453201b51a674646787fc8c"
+  },
+  {
+    "source": "condition_pointwise_experiment/cd_lightgcn_grpo_k_20261022/code/exact_policy.py",
+    "source_sha256": "0337079e345f74d3d2a4281acd5d4e6ff91f6e55153e895a72f6ecc07497c8e0"
+  },
+  {
+    "source": "condition_pointwise_experiment/cd_lightgcn_grpo_k_20261022/code/common.py",
+    "source_sha256": "4ddbe011129ab4380af143c4633a8cc456c87a882d52122992d6ee18228d8b4e"
+  },
+  {
+    "source": "condition_pointwise_experiment/cd_lightgcn_grpo_k_20261022/code/model_io.py",
+    "source_sha256": "b5ddc5f86bca62c73526408a48db4ccc283b60fd477a30c35e8e24788a10b0d8"
+  },
+  {
+    "source": "condition_pointwise_experiment/cd_lightgcn_grpo_k_20261022/code/train.py",
+    "source_sha256": "d7328376d5d53194516a1ca2b20c8f58b1a02b82f9fb6ad45481427bf3430ae8"
+  },
+  {
+    "source": "condition_pointwise_experiment/cd_lightgcn_grpo_k_20261022/code/prepare.py",
+    "source_sha256": "6fd89336c4f2f26bfd3d1089a64fbf7b06959d05a254124af6737226c19912fb"
+  },
+  {
+    "source": "condition_pointwise_experiment/cd_lightgcn_grpo_k_20261022/code/test_policy.py",
+    "source_sha256": "ef01b30faf1e03bf1f9b174e52462b82656d754035ba5d9a89c1c7f0b129945d"
+  },
+  {
+    "source": "amazon2023_user_disjoint_protocol.py",
+    "source_sha256": "a4243da3604d40c546715b27bcef44382548bf944343e3f5b600301c56d0e660"
+  }
+]

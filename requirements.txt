@@ -1,0 +1,6 @@
+Pillow>=10
+# Install a CUDA-compatible PyTorch build for your GPU before GPU training.
+torch>=2.6
+transformers>=4.57,<5
+peft>=0.17,<1
+accelerate>=1.10,<2
