@@ -16,11 +16,12 @@
     "max_pixels": 8000000
   },
   "reader": {
+    "enabled": true,
     "device": "cuda:0",
     "max_new_tokens": 4096
   },
   "max_candidates": 20,
   "max_turns": 40,
   "max_length": 2048,
-  "readability_threshold": 0.98
+  "readability_threshold": 0.90
 }

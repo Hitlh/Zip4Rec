@@ -35,10 +35,13 @@ def main():
         if not a.prepare_only:
             client = ChatClient(agent_config)
         meter = TokenMeter(a.model)
-        reader = LocalReader(meter, **config.get('reader', {}))
+        reader_config = dict(config.get('reader', {}))
+        threshold = config.get('readability_threshold', .90)
+        reader_enabled = reader_config.pop('enabled', threshold is not None)
+        reader = LocalReader(meter, **reader_config) if reader_enabled else None
         session = LayoutSession(examples, constraints, meter, reader, a.output,
             max_length=config.get('max_length', 2048),
-            readability_threshold=config.get('readability_threshold', .98),
+            readability_threshold=threshold,
             max_candidates=config.get('max_candidates', 20),
             text_token_limits=config.get('text_token_limits'),
             initial_source=Path(config['initial_layout']).read_text() if config.get('initial_layout') else None)

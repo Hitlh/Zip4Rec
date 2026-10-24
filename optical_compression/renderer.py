@@ -55,15 +55,10 @@ def pack_profile_fields(value: str) -> str:
     return " ".join(pack_profile_paragraphs(value))
 
 
-def render_compact(task: dict[str, Any]) -> dict[str, Any]:
-    cfg = {}  # Preserve original compact defaults (16px bottom pad, height aligned to 32).
-    width, pad, body_size = 640, 10, 14
-    title_font, section_font, body_font = font(18, True), font(15, True), font(body_size)
-    probe = Image.new("RGB", (width, 100), "white")
-    draw = ImageDraw.Draw(probe)
-    profile_lines = wrapped(draw, pack_profile_fields(task["profile"]), body_font, width - 2 * pad)
-    item = task["item"]
-    details = [
+def compact_sections(task: dict[str, Any]) -> dict[str, list[str]]:
+    """Exact displayed section text, shared by the original renderer and readback audit."""
+    item = task['item']
+    return dict(user=[pack_profile_fields(task['profile'])], item=[
         f"Title: {item['title']}",
         " • ".join([
             f"Artists: {', '.join(item['artists']) or 'Unknown'}",
@@ -71,7 +66,18 @@ def render_compact(task: dict[str, Any]) -> dict[str, Any]:
             f"Era / styles: {'; '.join([item['era'], ', '.join(item['moods'])]).strip('; ')}",
         ]),
         f"Summary: {item['summary']}",
-    ]
+    ])
+
+
+def render_compact(task: dict[str, Any]) -> dict[str, Any]:
+    cfg = {}  # Preserve original compact defaults (16px bottom pad, height aligned to 32).
+    width, pad, body_size = 640, 10, 14
+    title_font, section_font, body_font = font(18, True), font(15, True), font(body_size)
+    probe = Image.new("RGB", (width, 100), "white")
+    draw = ImageDraw.Draw(probe)
+    sections = compact_sections(task)
+    profile_lines = wrapped(draw, sections['user'][0], body_font, width - 2 * pad)
+    details = sections['item']
     item_lines = [line for value in details for line in wrapped(draw, value, body_font, width - 2 * pad)]
     line_h = 16
     raw_height = 20 + 24 + len(profile_lines) * line_h + 8 + 24 + len(item_lines) * line_h + int(cfg.get("bottom_pad", 16))

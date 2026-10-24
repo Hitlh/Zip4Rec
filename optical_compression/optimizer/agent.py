@@ -35,9 +35,15 @@ Use render_and_measure after code changes. Its tool report is followed by a USER
 containing the ACTUAL rendered images. Examine these images for readability and layout
 problems before deciding the next change. No separate image-inspection tool is needed.
 check_readability uses the local target VLM to transcribe the images independently and
-checks both sections against their source text. Do not substitute your visual opinion
-for this tool. A qualified candidate must pass it for all ten examples AND have strictly
-fewer TOTAL input tokens than each example's pure-text baseline AND fit max_length.
+reports both sections' similarities against their source text. inspect_inputs specifies
+readability_threshold: by default 0.90, requiring BOTH sections of ALL examples to reach
+that similarity before export. A null threshold makes scores diagnostic only. When a
+threshold is configured, call check_readability on promising candidates before finishing.
+inspect_inputs indicates whether local readback is enabled; do not call it when disabled.
+A qualified candidate must preserve text/geometry and have strictly fewer TOTAL input
+tokens than each example's pure-text baseline AND fit max_length. Visually inspect the
+rendered images before selecting a strategy. Local model weights are only needed if the
+transcription tool is enabled, never for processor token measurement.
 Among qualified candidates minimize mean visual tokens, then max visual tokens. The host
 selects the best deterministically. Check promising candidates; retain earlier successes
 if later changes fail. Stop with a concise explanation when no worthwhile improvement is
@@ -56,7 +62,7 @@ TOOLS = [
          dict(source=dict(type='string'), reason=dict(type='string'))),
     tool('render_and_measure', 'Render all examples; check geometry/content and actual processor tokens; images follow.',
          dict(candidate_id=dict(type='string'))),
-    tool('check_readability', 'Use the local base VLM to transcribe all rendered examples and update the best strategy.',
+    tool('check_readability', 'Measure local-VLM readback; apply the configured threshold (default 0.90), or report diagnostic scores if null.',
          dict(candidate_id=dict(type='string'))),
 ]
 

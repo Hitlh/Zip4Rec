@@ -15,7 +15,7 @@
 | `inspect_inputs` | 查看十条去标签训练样本、字体限制、纯文本基线、初始代码和当前最佳版本 |
 | `revise_layout` | 提交完整的候选 `layout()` 源码及修改理由 |
 | `render_and_measure` | 渲染、检查内容和几何边界、统计实际 token，并将真实 PNG 返回给视觉 agent |
-| `check_readability` | 用未适配的本地 Qwen3-VL 转写图片，独立计算与原文的相似度 |
+| `check_readability` | 用本地 Qwen3-VL 转写图片，按配置的阈值检查两个区域；阈值为 null 时仅报告分数 |
 
 Chat Completions 的工具返回值承载 JSON 测量结果；图片紧接着作为 user 多模态消息发送。agent 直接看图，无单独看图工具或候选比较工具。较早的图片会从后续请求中移除，数值反馈和本地图片文件保留。程序自动维护最佳策略，不依赖 agent 自报分数。未实际发送图片给 agent 的候选不能导出。
 
@@ -46,7 +46,7 @@ python -m optical_compression.optimize \
 
 ## 执行搜索
 
-按现有项目方式设置 `OPENAI_API_KEY` 和 `OPENAI_BASE_URL`，选择一张 GPU。agent 请求会发送选中样本的文字和图片到配置的服务，本地阅读检查使用所指定的 Qwen3-VL。
+按现有项目方式设置 `OPENAI_API_KEY` 和 `OPENAI_BASE_URL`。agent 请求会发送选中样本的文字和图片到配置的服务。默认 `reader.enabled=true`、`readability_threshold=0.90`，需本地 Qwen3-VL 权重进行转写。将阈值设为 `null` 可关闭转写门槛，此时可继续保留转写诊断，或再将 `reader.enabled=false` 设为仅用 processor/tokenizer 和 agent 看图，无需本地模型权重或 GPU。
 
 ```bash
 export CUDA_VISIBLE_DEVICES=0
@@ -66,9 +66,11 @@ python -m optical_compression.optimize \
 1. 上下分区，固定字体和字号，原文字段字符不丢失、不重复、字段内部不乱序，无裁切或遮挡。
 2. 使用正式评分相同的 system/user 提示及 generation prompt，图片方案的**总输入 token 严格少于同内容纯文本方案**；相等或更多不合格。
 3. 总输入长度不超过配置的 `max_length`，默认 2048。
-4. 本地模型仅接收图片和固定转写指令，不接收源文答案或相关性标签。两个区域各自的规范化字符序列相似度均达到 `readability_threshold`，默认 0.98。
+4. `readability_threshold` 非 null 时，所有初始化样本的用户区和物品区分别达到指定相似度，默认 0.90。启用此门槛时必须同时启用 reader。
 
-合格候选按平均真实视觉 token、最大视觉 token、候选 ID 依次升序选择。视觉 token 来自实际 processor 的图像占位 token 数，不使用页面面积估算，也不是图片文件大小。阅读指标是字符序列相似度代理，不等同于推荐质量或正式 OCR 准确率；可在初始化前设置更严格阈值。
+合格候选按平均真实视觉 token、最大视觉 token、候选 ID 依次升序选择。视觉 token 来自实际 processor 的图像占位 token 数，不使用页面面积估算，也不是图片文件大小。
+
+视觉 agent 同时查看实际图片。本地转写工具只接收图片和固定指令，不接收原文答案或相关性标签，返回用户区、物品区的字符序列相似度。**默认门槛为 90%，可配置为其他数值，或用 null 关闭。** 关闭后分数不影响候选合格判定、排序或导出。这些分数是可读性代理指标，与推荐质量和标准 OCR 准确率分开解释。
 
 没有合格候选时保留搜索记录、以失败状态结束，不导出 `frozen/`。十条样本上的最佳策略不代表全局最优；应在独立训练样本上检查泛化，再固定用于验证和测试。布局搜索不读取验证/测试结果，也不修改 SFT/GRPO 的训练算法。
 
@@ -121,7 +123,21 @@ python -m optical_compression.pipeline \
 
 也可对全流程配置添加 `"layout_strategy": "artifacts/layout_cd_search/frozen"`，再运行 `run_pipeline.py`。省略该字段或 `--layout` 时保留原 CD renderer，供原实验复现与基线比较。
 
-批量入口核对 processor 与优化时一致，并对 train/valid/test **每条输入**检查长度和严格小于纯文本的要求；短样本等若不满足会明确失败，不按验证或测试表现重新搜索。阅读检查的合格范围仍是初始化十条样本。`--layout` 不触发 agent 请求。更换策略需使用新的输出目录，并重新生成下游输入、参考缓存和训练结果。
+批量入口核对 processor 与优化时一致，并对 train/valid/test **每条输入**检查长度和严格小于纯文本的要求；短样本等若不满足会明确失败，不按验证或测试表现重新搜索。可选转写只报告实际测过的初始化样本分数。`--layout` 不触发 agent 请求。更换策略需使用新的输出目录，并重新生成下游输入、参考缓存和训练结果。
+
+## 测量当前实验的固定排版
+
+简易初始布局和原 CD 实验排版是两种不同程序。以下入口调用原实验 `render_compact()`，以实际绘制的字段格式作为转写对照；标题、配色、字体、640px 宽度及动态高度均保持原样。
+
+```bash
+python -m optical_compression.audit \
+  --samples artifacts/cd_prepare/datasets/train_candidates.jsonl \
+  --model data/models/Qwen3-VL-8B-Instruct \
+  --output artifacts/current_compact_audit \
+  --readback
+```
+
+`--readback` 加载本地模型权重进行诊断；省略它只渲染和统计真实 token。输出 `report.json`、PNG、逐样本用户区/物品区相似度及均值/最小值/最大值，不判定转写通过率。使用与优化相同的十条输入，可比较不同排版的实测分数。
 
 ## 验证范围
 

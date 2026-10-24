@@ -163,18 +163,46 @@ class LayoutOptimizerTests(unittest.TestCase):
             session.meter.image = lambda path: dict(original(path), total_input_tokens=5000)
             self.assertFalse(session.render_and_measure(cid)['token_qualified'])
 
-    def test_readback_failure_and_unverified_baselines_cannot_qualify(self):
+    def test_readback_is_diagnostic_and_unverified_token_baselines_are_rejected(self):
         with tempfile.TemporaryDirectory() as folder:
-            session = self.session(Path(folder) / 'search')
+            session = self.session(Path(folder) / 'search', readability_threshold=None)
             cid = session.revise_layout(PACKED, 'compact')['candidate_id']
             session.render_and_measure(cid)
             provide_readings(session, cid)
             session.reader.results[next(iter(session.reader.results))] = '{"user":"missing","item":"wrong"}'
-            self.assertFalse(session.check_readability(cid)['qualified'])
-            self.assertIsNone(session.freeze({}))
+            feedback = session.check_readability(cid)
+            self.assertTrue(feedback['qualified'])
+            self.assertLess(feedback['readability'][0]['mean_section_similarity'], .98)
+            self.assertIsNotNone(session.freeze({}))
             with self.assertRaisesRegex(ValueError, 'pure-text counts'):
                 self.session(Path(folder) / 'wrong_baseline', text_token_limits={'example_01': 1_000_000})
-        self.assertFalse(reading_result('not json', {'user': ['x'], 'item': ['y']}, .98)['passed'])
+        self.assertFalse(reading_result('not json', {'user': ['x'], 'item': ['y']})['parsed'])
+
+    def test_export_without_readback_does_not_require_model_weights(self):
+        with tempfile.TemporaryDirectory() as folder:
+            session = self.session(Path(folder) / 'search', readability_threshold=None)
+            session.reader = None
+            cid = session.revise_layout(PACKED, 'compact')['candidate_id']
+            session.render_and_measure(cid)
+            self.assertFalse(session.check_readability(cid)['enabled'])
+            frozen = session.freeze({'model': 'offline'})
+            metadata = json.loads((frozen / 'layout.json').read_text())
+            self.assertIsNone(metadata['reader'])
+            self.assertIsNone(metadata['evaluation_limits']['readability_threshold'])
+
+    def test_default_90_percent_threshold_and_stricter_configuration(self):
+        with tempfile.TemporaryDirectory() as folder:
+            self.assertEqual(self.session(Path(folder) / 'default').threshold, .90)
+            for threshold, expected in [(.90, True), (.95, True), (.98, False)]:
+                session = self.session(Path(folder) / str(threshold), readability_threshold=threshold)
+                cid = session.revise_layout(PACKED, 'compact')['candidate_id']
+                self.assertFalse(session.render_and_measure(cid)['qualified'])
+                provide_readings(session, cid)
+                path = next(iter(session.reader.results))
+                raw = json.loads(session.reader.results[path])
+                raw['user'] = raw['user'][:int(len(raw['user']) * .94)]
+                session.reader.results[path] = json.dumps(raw)
+                self.assertEqual(session.check_readability(cid)['qualified'], expected)
 
     def test_frozen_bundle_is_portable_and_checks_source_and_font_hashes(self):
         with tempfile.TemporaryDirectory() as folder:

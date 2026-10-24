@@ -69,7 +69,8 @@ def normalized_reading(value):
     return ''.join(unicodedata.normalize('NFKC', value).split())
 
 
-def reading_result(raw, sections, threshold):
+def reading_result(raw, sections):
+    """Report transcription similarity as a diagnostic, without an acceptance threshold."""
     try:
         content = raw.strip()
         if content.startswith('```'):
@@ -79,14 +80,14 @@ def reading_result(raw, sections, threshold):
                 or not all(isinstance(v, str) for v in result.values())):
             raise ValueError('invalid transcription schema')
     except (ValueError, TypeError, IndexError) as exc:
-        return dict(passed=False, error=str(exc), raw=raw)
+        return dict(parsed=False, error=str(exc), raw=raw)
     scores = {}
     for name in ['user', 'item']:
         expected = normalized_reading(' '.join(sections[name]))
         observed = normalized_reading(result[name])
         scores[name] = difflib.SequenceMatcher(None, expected, observed, autojunk=False).ratio()
-    return dict(passed=all(s >= threshold for s in scores.values()),
-                section_similarity=scores, threshold=threshold, transcription=result)
+    return dict(parsed=True, section_similarity=scores,
+                mean_section_similarity=sum(scores.values()) / len(scores), transcription=result)
 
 
 class LocalReader:
