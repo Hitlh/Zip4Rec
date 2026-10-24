@@ -11,15 +11,15 @@
 | 用户组、时间目标与检索器 | `lightgcn.py` | 固定用户组、目标、历史、LightGCN 权重、完整验证和测试自然候选 |
 | 严格未来屏蔽训练组 | `build_natural_train.py` | 三个历史截点的自然 Top-10 命中训练组 |
 | 语义资产输入准备 | `datasets.py collect` | 经原始事件序列核验的三类 source、仅含长期历史的画像上下文 |
-| 物品摘要生成 | `generate_assets.py prepare-items / parse-items` | 原始提示词、请求、原始返回、通过 schema 校验的物品描述 |
+| 物品摘要生成 | `generate_assets.py prepare-items / parse-items` | 生成提示词、请求、原始返回、通过 schema 校验的物品描述 |
 | 用户画像生成 | `generate_assets.py prepare-profiles / parse-profiles` | 历史提示词、请求、原始返回、通过证据约束的用户画像 |
 | 请求执行 | `run_requests.py` | 支持断点续跑的同步请求、Batch 提交/下载和失败重试输入 |
 | 语义训练样本 | `prepare.py`, `samples.py`, `datasets.py export` | train/valid/test、SFT 正负配对、完整候选与用户数统计 |
-| 阶段串联 | `pipeline.py` | 三个可检查阶段，将上述实际实现串起来 |
+| 阶段串联 | `pipeline.py` | 三个可检查阶段，将上述实现串起来 |
 
 ### 数据筛选规则
 
-使用原 CD 实验的顺序规则：元数据连接；标题和描述非空；初始用户交互下限；物品至少重复出现；每用户至少三个五星、两个四星交互；再次检查用户下限；每个 `(user_id, parent_asin)` 保留最新一次交互；保留 `rating >= 4`；迭代 user-10/item-15 k-core 至稳定。先按最新交互去重，再判断正反馈，不能反过来保留一个后来被低分覆盖的旧正例。
+使用CD 实验的顺序规则：元数据连接；标题和描述非空；初始用户交互下限；物品至少重复出现；每用户至少三个五星、两个四星交互；再次检查用户下限；每个 `(user_id, parent_asin)` 保留最新一次交互；保留 `rating >= 4`；迭代 user-10/item-15 k-core 至稳定。先按最新交互去重，再判断正反馈，不能反过来保留一个后来被低分覆盖的旧正例。
 
 过滤后的 TSV 中 train/valid/test 是每个用户的时间位置标记，不是最终重排序样本的角色。`lightgcn.py` 再将用户按稳定 SHA256 分成 validation / test / train_only 三个 cohort；validation 和 test 用户互斥，各自最后一次正反馈作为外部目标。训练样本来自每用户更早的三个截点，所以训练样本用户可能与评估用户重合。对应用户的最终留出目标及训练截点之后的全部已知正反馈，不能作为该训练样本的目标、历史或负候选。
 
@@ -35,7 +35,7 @@
 
 ## 从原始文件运行
 
-从仓库根目录执行，先安装 `requirements.txt`；LightGCN 支持 CPU / CUDA。默认参数对应当前 CD 示例的 user-10/item-15、三个截点、35 epoch 和 seed603759240。不同原始文件或数值环境不保证重现历史样本数。
+从仓库根目录执行，先安装 `requirements.txt`；LightGCN 支持 CPU / CUDA。默认参数对应 CD / LightGCN 配置的 user-10/item-15、三个截点、35 epoch 和 seed603759240。不同原始文件或数值环境不保证重现历史样本数。
 
 ### 1. 筛选、候选、历史上下文与物品请求
 

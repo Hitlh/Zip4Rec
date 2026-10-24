@@ -1,9 +1,4 @@
-"""Optional score-level prototypes; historical training code is unchanged.
-
-For one positive in a short Plackett-Luce list, marginalize over subsets
-of negatives selected before the positive. This differentiates the same
-expected NDCG objective as REINFORCE without Monte Carlo sampling.
-"""
+"""Exact short-list PL expectation for training diagnostics and gradient tests."""
 from functools import lru_cache
 import math
 
@@ -73,32 +68,3 @@ def expected_ndcg(scores, positive, temperature=1.0, cutoff=10):
     rank = torch.arange(1, len(scores) + 1, device=scores.device, dtype=probabilities.dtype)
     reward = torch.where(rank <= cutoff, 1 / torch.log2(rank + 1), 0.0)
     return (probabilities * reward).sum()
-
-
-def exact_task_loss(scores, positive, temperature=1.0, cutoff=10):
-    """Replace only the task term; add existing KL/replay terms separately."""
-    return -expected_ndcg(scores, positive, temperature, cutoff)
-
-
-def stopped_log_probability(scores, permutations, positive, temperature=1.0):
-    """Log probability of each prefix ending at the positive, inclusive.
-
-    Later choices do not affect the reward, so their score-function terms
-    have conditional expectation zero and may be omitted without bias.
-    """
-    ordered = (scores / temperature)[permutations]
-    suffix = torch.logcumsumexp(ordered.flip(-1), dim=-1).flip(-1)
-    stop = (permutations == positive).long().argmax(-1)
-    positions = torch.arange(permutations.shape[-1], device=scores.device)
-    return ((ordered - suffix) * (positions <= stop[:, None])).sum(-1)
-
-
-def leave_one_out_task_loss(scores, permutations, positive, temperature=1.0):
-    """Unbiased prefix REINFORCE with a baseline from the other samples."""
-    if len(permutations) < 2:
-        raise ValueError('leave-one-out requires at least two samples')
-    rank = (permutations == positive).long().argmax(-1) + 1
-    reward = 1 / torch.log2(rank.to(scores.dtype) + 1)
-    baseline = (reward.sum() - reward) / (len(reward) - 1)
-    return -((reward - baseline).detach()
-             * stopped_log_probability(scores, permutations, positive, temperature)).mean()

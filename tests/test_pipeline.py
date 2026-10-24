@@ -16,7 +16,7 @@ from workflow import digest
 from semantic_context.samples import pointwise
 
 ROOT = Path(__file__).resolve().parents[1]
-EXAMPLES = ROOT / 'examples/cd_lightgcn'
+CONFIGS = ROOT / 'configs/cd_lightgcn'
 
 
 def write_temporary_fixtures(directory):
@@ -132,7 +132,7 @@ class PipelineTests(unittest.TestCase):
                 (p / name).write_text(''.join(json.dumps(r) + '\n' for r in rows))
             write('train.jsonl', train)
             write('valid.jsonl', valid)
-            command = [sys.executable, '-m', 'ranking.make_run', '--config', str(EXAMPLES / 'grpo.json'),
+            command = [sys.executable, '-m', 'ranking.make_run', '--config', str(CONFIGS / 'grpo.json'),
                        '--base-model', str(p / 'base'), '--initial-adapter', str(p / 'adapter'),
                        '--train', str(p / 'train.jsonl'), '--valid', str(p / 'valid.jsonl'), '--output']
             subprocess.run(command + [str(p / 'ok')], cwd=ROOT, check=True, capture_output=True, text=True)

@@ -7,6 +7,6 @@
   "asset_workers": 1,
   "filtering": {"user_k": 10, "item_k": 15},
   "retrieval": {"device": "cuda", "epochs": 35, "validation_users": 1000, "test_users": 1000},
-  "grpo_config": "examples/cd_lightgcn/grpo.json",
+  "grpo_config": "configs/cd_lightgcn/grpo.json",
   "sft_learning_rate": 0.00001
 }

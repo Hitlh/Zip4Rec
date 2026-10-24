@@ -3,10 +3,15 @@ import math
 import tempfile
 import unittest
 from pathlib import Path
-import torch
-from .exact_policy import expected_ndcg
-from .policy import (action_log_probs, clipped_task, critic_features, make_rollout, objective,
-                    permutation_rewards, policy_logits, sample_permutations)
+try:
+    import torch
+except ModuleNotFoundError:
+    torch = None
+
+if torch is not None:
+    from ranking.exact_policy import expected_ndcg
+    from ranking.policy import (action_log_probs, clipped_task, critic_features, make_rollout, objective,
+                                permutation_rewards, policy_logits, sample_permutations)
 
 
 def config(kind='grpo', mode='dense'):
@@ -15,6 +20,7 @@ def config(kind='grpo', mode='dense'):
         'kl_coefficient': .02, 'sft_coefficient': .1, 'dpo_beta': .15}
 
 
+@unittest.skipUnless(torch is not None, "policy tests require PyTorch")
 class PolicyTests(unittest.TestCase):
     def test_pl_step_normalization_and_enumeration(self):
         g = torch.tensor([.3, -.2, .8], dtype=torch.float64, requires_grad=True)
