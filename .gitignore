@@ -10,3 +10,23 @@ runs/
 *.pt
 *.safetensors
 *.bin
+
+# Raw datasets, prepared records, features and experiment outputs stay local.
+datasets/
+raw/
+processed/
+checkpoints/
+*.jsonl
+*.jsonl.gz
+*.csv
+*.csv.gz
+*.tsv
+*.tsv.gz
+*.parquet
+*.arrow
+*.npy
+*.npz
+*.pkl
+*.pickle
+*_results.json
+results.json

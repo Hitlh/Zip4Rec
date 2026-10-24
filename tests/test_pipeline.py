@@ -19,11 +19,45 @@ ROOT = Path(__file__).resolve().parents[1]
 EXAMPLES = ROOT / 'examples/cd_lightgcn'
 
 
+def write_temporary_fixtures(directory):
+    """Build tiny synthetic inputs during tests; no dataset files are distributed."""
+    items = [dict(original_item_id=f'CD{i:02}', title=f'Synthetic Album {i}',
+                  summary=dict(canonical_title=f'Synthetic Album {i}', artists=['Example Artist'],
+                               genres=['Jazz' if i % 2 else 'Rock'], era='2000s',
+                               styles_or_moods=['melodic'], summary='',
+                               compact_summary=f'A fictional album, record {i}.')) for i in range(14)]
+    profile = dict(preference_summary='Prefers melodic rock and jazz.',
+                   preferred_genres=[dict(name='Rock', strength='strong', evidence_count=3)],
+                   preferred_artists_or_scenes=[], preferred_eras=['2000s'],
+                   preferred_moods_or_styles=['melodic'], diversity='moderate',
+                   evidence_strength='moderate', uncertainties=[])
+    profiles = []
+    def write(name, records):
+        (directory / name).write_text(''.join(json.dumps(r) + '\n' for r in records))
+    for split in ['train', 'valid', 'test']:
+        user = 'demo-' + split
+        group = dict(sample_id=f'{split}-synthetic', split=split, user_id=user,
+                     target_item_id='CD07', target_injected=False,
+                     candidate_item_ids=[f'CD{i:02}' for i in range(10)],
+                     candidate_scores=[1-i*.07 for i in range(10)],
+                     history_item_ids=['CD10', 'CD11', 'CD12', 'CD13'],
+                     long_history_item_ids=['CD10'], recent_history_item_ids=['CD11', 'CD12', 'CD13'],
+                     profile_history_key=user)
+        write(f'{split}_groups.jsonl', [group])
+        profiles.append(dict(profile_history_key=user, profile=profile))
+    write('item_summaries.jsonl', items)
+    write('user_profiles.jsonl', profiles)
+
+
 class PipelineTests(unittest.TestCase):
     def setUp(self):
-        self.items = load_validated_items(EXAMPLES / 'item_summaries.jsonl')
-        self.profiles = load_profiles(EXAMPLES / 'user_profiles.jsonl')
-        self.group = read_jsonl(EXAMPLES / 'train_groups.jsonl')[0]
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.fixture_dir = Path(self.temporary.name)
+        write_temporary_fixtures(self.fixture_dir)
+        self.items = load_validated_items(self.fixture_dir / 'item_summaries.jsonl')
+        self.profiles = load_profiles(self.fixture_dir / 'user_profiles.jsonl')
+        self.group = read_jsonl(self.fixture_dir / 'train_groups.jsonl')[0]
 
     def test_reject_history_and_candidate_leakage(self):
         for field, value in [('target_injected', True), ('target_item_id', 'CD10'),
@@ -115,7 +149,7 @@ class PipelineTests(unittest.TestCase):
             datasets.mkdir()
             manifest = dict(output_sha256={}, splits={})
             for split in ['train', 'valid', 'test']:
-                group = read_jsonl(EXAMPLES / f'{split}_groups.jsonl')[0]
+                group = read_jsonl(self.fixture_dir / f'{split}_groups.jsonl')[0]
                 context = organize(group, self.profiles, self.items)
                 _, samples = pointwise([context], self.items)
                 path = datasets / f'{split}_candidates.jsonl'

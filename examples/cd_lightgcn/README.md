@@ -11,7 +11,7 @@ export CUDA_VISIBLE_DEVICES=0
 python run_pipeline.py --config examples/cd_lightgcn/pipeline.json
 ```
 
-该命令会实际运行数据筛选、五次上游 LightGCN 训练、物品描述与用户画像请求、返回校验、三类语义集导出、DensePage 渲染、全量 processor 检查、SFT 训练和验证、GRPO 参考构建与训练、验证集选择、最后的测试推理和整体指标计算。语义生成会使用配置的服务，模型训练使用选定 GPU；历史 `reference_results.json` 不参与训练或选择。
+该命令会实际运行数据筛选、五次上游 LightGCN 训练、物品描述与用户画像请求、返回校验、三类语义集导出、DensePage 渲染、全量 processor 检查、SFT 训练和验证、GRPO 参考构建与训练、验证集选择、最后的测试推理和整体指标计算。语义生成会使用配置的服务，模型训练使用选定 GPU；本次运行生成自己的训练资产与评分；仓库不附带数据文件或实验结果文件。
 
 输出在 `artifacts/zip4rec_cd_full/`：
 
@@ -31,20 +31,18 @@ ranking/
 
 SFT 每个 epoch 保存一次，步数根据当前正负配对总数计算；GRPO 检查点按当前用户组数与四分位比例计算。测试分母读取本次完整评估用户数。`workflow_state.json` 记录每个阶段的命令、状态和产物哈希；相同配置重跑可跳过已完成且未变化的阶段。已失败阶段保留报告；SFT / GRPO 中断恢复使用各训练入口的 checkpoint 参数，API 返回校验失败则先处理失败记录，不自动更换模型或用测试结果重选。
 
-以下给出模块级运行和小型接口演示，方便检查某个处理阶段。
+以下给出模块级运行与验证命令，方便检查某个处理阶段。
 
-## 1. 安装与无模型演示
+## 1. 安装与检查
 
-从仓库根目录运行。CPU 演示只需要 Pillow；模型阶段另需安装兼容显卡的 PyTorch 与 `requirements.txt` 中其余依赖。
+从仓库根目录运行，安装兼容显卡的 PyTorch 及 `requirements.txt`。仓库不提供原始数据或预处理数据；输入路径在 `pipeline.json` 中指定，完整处理流程会在本地生成所需资产。
 
 ```bash
-python -m pip install Pillow
-python -m semantic_context.prepare --groups examples/cd_lightgcn/train_groups.jsonl --item-summaries examples/cd_lightgcn/item_summaries.jsonl --user-profiles examples/cd_lightgcn/user_profiles.jsonl --output artifacts/demo/train_context.jsonl
-python -m optical_compression.build --groups artifacts/demo/train_context.jsonl --item-summaries examples/cd_lightgcn/item_summaries.jsonl --output artifacts/demo/train
+python -m pip install -r requirements.txt
 python -m unittest discover -s tests -v
 ```
 
-随仓库提供的三组 `*_groups.jsonl`、画像及物品语义全部是合成数据，只用于检验接口，不能得到论文指标。将 `train` 替换为 `valid` 或 `test` 可分别构建其他集合。每个输出目录必须是新目录。
+测试所需的微型合成记录在临时目录动态创建，并在测试结束后清理，不依赖仓库中的数据文件。
 
 ## 2. 准备真实输入
 
@@ -105,7 +103,7 @@ python -m ranking.evaluate --scores artifacts/cd/test_scores.jsonl --alpha 1.5 -
 
 ## 历史参考
 
-`reference_results.json` 来自原实验存档，未在本次代码整理中重训。101 名验证命中用户、108 名测试命中用户；测试全集 1,000 用户。GRPO step237、alpha=1.5 的条件 NDCG@10 为 0.573137954，整体 NDCG@10 为 0.061898899。属于单种子、已有测试暴露的实验记录。
+以下指标是原实验的文档记录，未在本次代码整理中重训，仓库不分发对应数据和结果文件。101 名验证命中用户、108 名测试命中用户；测试全集 1,000 用户。GRPO step237、alpha=1.5 的条件 NDCG@10 为 0.573137954，整体 NDCG@10 为 0.061898899。属于单种子、已有测试暴露的实验记录。
 
 策略数值测试：
 

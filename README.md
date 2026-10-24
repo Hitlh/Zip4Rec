@@ -464,12 +464,12 @@ Zip4Rec/
 ├── semantic_context/       # 模块一：原始数据 → 语义资产 → train/valid/test
 ├── optical_compression/    # 模块二：DensePage 渲染与样本构建
 ├── ranking/                # 模块三：SFT → GRPO → 评分 → 融合评估
-├── examples/cd_lightgcn/   # 配置、合成小样例与历史结果
+├── examples/cd_lightgcn/   # 配置与运行说明
 ├── tests/                  # 数据边界、渲染、排序与策略校验
 └── docs/                   # 来源与迁移说明
 ```
 
-仓库包含核心代码与合成示例；真实数据、离线生成的语义资产、基础模型及 LoRA 权重由运行者另行准备。
+仓库只提供代码、配置和文档。原始数据、处理后的训练/验证/测试集、物品描述、用户画像、生成请求与响应、图像和模型权重均在本地准备或生成，不随仓库发布。测试所需的微型合成输入在临时目录动态生成。
 历史参考配置为十候选、每用户采样八个排列、固定融合系数 1.5，SFT 初始化为 LR=1e-5 的 checkpoint-316，GRPO 验证集选中 checkpoint-237。
 它对应现有 CD / LightGCN 分支，不将早期 README 中四排列的基础配置替换为通用默认结论。
 
