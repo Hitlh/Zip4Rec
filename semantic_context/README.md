@@ -1,71 +1,71 @@
-# 模块一：从原始数据到训练、验证与测试集
+# 模块一：数据与语义准备
 
-本模块完整负责数据准备：原始 Amazon Reviews 2023 CDs & Vinyl reviews / metadata → 数据筛选与去重 → 正反馈 k-core → 冻结用户组和时间目标 → LightGCN 自然候选 → 物品语义提取 → 历史用户画像 → 可用于后续渲染的语义样本与正负训练配对。
+从原始 reviews 和 metadata 开始，生成物品描述、用户画像以及可供后续渲染和训练的三个数据划分。
 
-## 处理步骤与代码
+## 工作流程
 
-| 步骤 | 实现 | 产物 |
+1. 按物品标题/描述、用户交互数和评分组合筛选数据；同一用户与物品保留最新交互，以评分 ≥4 为正反馈，执行 k-core。
+2. 按时间组织历史，固定互斥的验证/测试用户组；训练 LightGCN，生成不注入目标的自然 Top-10。训练使用更早的三个时间截点，并屏蔽未来正反馈。
+3. 从清洗后的物品元数据生成结构化物品描述，再仅用长期历史中的物品描述生成用户画像；最近三次正反馈单独保留。
+4. 校验语义返回，导出训练/验证/测试集、SFT 正负配对和 GRPO 十候选组。召回未命中的验证/测试用户也保存，用于整体指标。
+
+## 输入格式
+
+两个文件均为 UTF-8 JSONL 或 JSONL.GZ，一行一个对象，物品 ID 通过 `parent_asin` 对齐。
+
+| 文件 | 必需字段 | 可选字段 |
 | --- | --- | --- |
-| 原始数据筛选 | `raw_filters.py`, `filter_data.py` | 去重后的正反馈交互 TSV、各级筛选统计 |
-| 物品描述清洗 | `extract_metadata.py` | 标题、类别、品牌、去 HTML 描述与原始 ID 映射 |
-| 用户组、时间目标与检索器 | `lightgcn.py` | 固定用户组、目标、历史、LightGCN 权重、完整验证和测试自然候选 |
-| 严格未来屏蔽训练组 | `build_natural_train.py` | 三个历史截点的自然 Top-10 命中训练组 |
-| 语义资产输入准备 | `datasets.py collect` | 经原始事件序列核验的三类 source、仅含长期历史的画像上下文 |
-| 物品摘要生成 | `generate_assets.py prepare-items / parse-items` | 生成提示词、请求、原始返回、通过 schema 校验的物品描述 |
-| 用户画像生成 | `generate_assets.py prepare-profiles / parse-profiles` | 历史提示词、请求、原始返回、通过证据约束的用户画像 |
-| 请求执行 | `run_requests.py` | 支持断点续跑的同步请求、Batch 提交/下载和失败重试输入 |
-| 语义训练样本 | `prepare.py`, `samples.py`, `datasets.py export` | train/valid/test、SFT 正负配对、完整候选与用户数统计 |
-| 阶段串联 | `pipeline.py` | 三个可检查阶段，将上述实现串起来 |
+| reviews | `user_id`、`parent_asin`、`rating`、`timestamp` | 其他字段不参与当前流程 |
+| metadata | `parent_asin`、非空 `title`、非空 `description`（字符串或列表） | `categories`、`store`、`details` |
 
-### 数据筛选规则
+单条记录的格式示例：
 
-使用CD 实验的顺序规则：元数据连接；标题和描述非空；初始用户交互下限；物品至少重复出现；每用户至少三个五星、两个四星交互；再次检查用户下限；每个 `(user_id, parent_asin)` 保留最新一次交互；保留 `rating >= 4`；迭代 user-10/item-15 k-core 至稳定。先按最新交互去重，再判断正反馈，不能反过来保留一个后来被低分覆盖的旧正例。
+```json
+{"user_id":"u1","parent_asin":"CD01","rating":5.0,"timestamp":1609459200000}
+```
 
-过滤后的 TSV 中 train/valid/test 是每个用户的时间位置标记，不是最终重排序样本的角色。`lightgcn.py` 再将用户按稳定 SHA256 分成 validation / test / train_only 三个 cohort；validation 和 test 用户互斥，各自最后一次正反馈作为外部目标。训练样本来自每用户更早的三个截点，所以训练样本用户可能与评估用户重合。对应用户的最终留出目标及训练截点之后的全部已知正反馈，不能作为该训练样本的目标、历史或负候选。
+```json
+{"parent_asin":"CD01","title":"Example Album","description":["A jazz recording."],"categories":["CDs & Vinyl","Jazz"],"store":"Example Artist"}
+```
 
-上游 `core/sft_records.jsonl` 是历史流程构造的含目标候选中间件，**不能直接作为最终训练集**。`build_natural_train.py` 重新训练各截点的检索器、屏蔽已见物品和全部未来正例，只保留目标自然进入 Top-10 的训练组；最终导出还会重新按原始事件验证时间前缀和未来屏蔽。
+`rating` 使用 1–5 分；时间戳必须可转换为整数，并在整个数据集中保持同一单位。当前 CD 筛选要求每用户至少三条五星和两条四星交互，之后还须满足正反馈 k-core，默认 user-10 / item-15。输入必须有足够用户供验证/测试划分、有足够未交互物品供十候选召回；每个划分需要自然命中样本才能继续训练。
 
-### 物品描述与画像如何提取
+## 代码作用
 
-物品请求读取清洗后的标题、类别、品牌和描述，输出 `canonical_title / artists / genres / styles_or_moods / era / grounded_summary / knowledge_enrichment / compact_summary / uncertainties` 等字段。原始知识增强提示词随代码保存：输入支持的事实与模型先验补充分别放入 `grounded_summary` 和 `knowledge_enrichment`，摘要上限为 60 个英文空格分词。
+| 文件 | 作用 |
+| --- | --- |
+| `pipeline.py` | 串联准备、物品返回校验、画像返回校验与数据导出 |
+| `raw_filters.py`、`filter_data.py` | CD 原始条件筛选、最新交互去重、正反馈与 k-core |
+| `extract_metadata.py` | 提取物品元数据，清洗 HTML 和空白，建立物品 ID 映射 |
+| `lightgcn.py` | 时间目标与用户组划分、LightGCN 训练、自然 Top-10 召回 |
+| `build_natural_train.py` | 构建更早时间截点的训练候选，屏蔽未来正反馈 |
+| `datasets.py` | 收集历史上下文、检查时间边界、导出三个划分及完整评估用户 |
+| `generate_assets.py` | 生成物品/画像请求，解析并校验返回 |
+| `llm_profile_common.py` | 领域提示词、JSON schema、语义校验和文件读写 |
+| `run_requests.py` | 执行兼容 API 请求，支持并发、已完成请求续跑和失败请求重试 |
+| `assets.py` | 加载有效物品描述、格式化用户画像 |
+| `prepare.py` | 组织用户历史、画像和候选上下文 |
+| `samples.py` | 生成逐候选记录、确定性 SFT 正负配对与回放权重 |
 
-画像只读取长期正反馈历史的物品语义，按旧到新顺序组织；最近三次正反馈留在近期历史字段。画像请求不包含用户 ID、目标、候选、LightGCN 分数或划分标签。输出长期偏好摘要、偏好类型、风格、证据数量和不确定性。单条证据只能标为 weak；证据数不得超过输入历史长度；至多两条长期记录只能为 sparse。空长期历史使用确定性空画像。校验不通过、缺少返回或重复返回时会停止阶段，不将失败内容当作有效训练资产。
+## 如何运行
 
-请求、schema、来源摘要、返回模型、usage、提示词版本和内容哈希都会保留。发布前的导出会核对完整语义资产覆盖、画像历史与物品摘要哈希，防止接错画像或复用旧摘要的画像。
-
-## 从原始文件运行
-
-从仓库根目录执行，先安装 `requirements.txt`；LightGCN 支持 CPU / CUDA。默认参数对应 CD / LightGCN 配置的 user-10/item-15、三个截点、35 epoch 和 seed603759240。不同原始文件或数值环境不保证重现历史样本数。
-
-### 1. 筛选、候选、历史上下文与物品请求
+从仓库根目录执行；环境及 API 变量按[根 README](../README.md) 设置。
 
 ```bash
+# 1. 筛选原始数据、训练检索器、准备物品描述请求。
 python -m semantic_context.pipeline prepare \
   --reviews data/raw/CDs_and_Vinyl.jsonl.gz \
   --metadata data/raw/meta_CDs_and_Vinyl.jsonl.gz \
   --output artifacts/cd_prepare --device cuda --asset-model gpt-4o
-```
 
-此阶段冻结配置并训练上游检索器，输出 `filtered/`、`core/`、`natural_train/`、`sources/` 和 `item_requests/`。检索参数预先固定，测试结果不参与任何参数选择；若要调参，应单独运行下层入口并仅用验证集选择，再从冻结检索器释放测试集。不要用测试召回率调整筛选阈值或重跑挑选数据划分。
-
-### 2. 执行物品语义请求，再生成画像请求
-
-配置服务地址与当前终端的 `OPENAI_API_KEY` 环境变量。凭据不写入仓库、配置文件或命令参数。请求执行是显式步骤，`pipeline` 本身只负责准备与校验数据。
-
-```bash
-export OPENAI_BASE_URL='https://api.openai.com/v1'
+# 2. 生成物品描述，再准备用户画像请求。
 python -m semantic_context.run_requests sync \
   --requests artifacts/cd_prepare/item_requests/requests.jsonl \
   --output artifacts/cd_prepare/item_results.jsonl
 python -m semantic_context.pipeline finish-items \
   --work artifacts/cd_prepare --results artifacts/cd_prepare/item_results.jsonl
-```
 
-若使用支持同样 Chat Completions 格式的服务，填写其地址。模型名由 `--asset-model` 设定；历史默认是 gpt-4o，并不要求替换为其他模型。`python -m semantic_context.run_requests --help` 可查看 Batch 和重试命令。中断后可对同一请求和输出重跑；已记录失败的请求先用 `retry-input` 单独生成重试文件。
-
-### 3. 执行画像请求并导出全部数据集
-
-```bash
+# 3. 生成用户画像，导出训练集、验证集和测试集。
 python -m semantic_context.run_requests sync \
   --requests artifacts/cd_prepare/profile_requests/requests.jsonl \
   --output artifacts/cd_prepare/profile_results.jsonl
@@ -73,38 +73,24 @@ python -m semantic_context.pipeline finish-profiles \
   --work artifacts/cd_prepare --results artifacts/cd_prepare/profile_results.jsonl
 ```
 
-如果所有长期历史都为空，画像请求文件为空，此时直接提供空结果 JSONL 给 `finish-profiles` 即可，确定性画像已经保存。所有阶段的输出路径需是新目录；失败后的校验报告和原始返回保留，使用下层入口向新目录重新校验，不覆盖已经冻结的成功产物。
+`prepare --help` 可查看筛选下限、种子、召回训练轮数、batch size 和验证/测试用户数。默认验证/测试各 1000 用户，小数据集需降低 `--validation-users` 和 `--test-users`。使用新输出目录开始准备。
 
-## 最终产物和模块二衔接
+如果长期历史均为空，画像请求也为空，此时创建空的 `profile_results.jsonl` 后执行 `finish-profiles`；总入口自动处理这种情况。返回不通过校验时查看 `items/` 或 `profiles/` 的报告；请求工具的完整命令见 `python -m semantic_context.run_requests --help`。
 
-```text
-artifacts/cd_prepare/
-├── filtered/                       # 交互 TSV、元数据 CSV 与筛选统计
-├── core/                           # 用户组、检索器与完整评估候选
-├── natural_train/                  # 严格未来屏蔽的自然训练组
-├── sources/                        # 冻结的三类请求和数值 ID 画像历史
-├── item_requests/, item_results.jsonl
-├── items/item_summaries.jsonl       # 有效物品语义与生成来源
-├── profile_requests/, profile_results.jsonl
-├── profiles/user_profiles.jsonl    # 有效用户画像与生成来源
-└── datasets/
-    ├── train.jsonl                 # 自然命中训练组及语义上下文
-    ├── train_pairs.jsonl           # 一正一负的语义 SFT 配对与权重
-    ├── train_candidates.jsonl      # GRPO 完整十候选及 SFT 回放标记
-    ├── valid.jsonl, test.jsonl     # 自然命中验证/测试组
-    ├── valid_candidates.jsonl, test_candidates.jsonl
-    ├── valid_all.jsonl, test_all.jsonl  # 包括召回未命中的完整评估用户
-    └── manifest.json              # 全量/命中计数、Recall@10 与输入输出哈希
-```
+## 输出与下一步
 
-语义逐候选记录包含 `user_context`、`candidate_payload`、A/B 标签、候选原分数和 `_replay` 等字段，不包含 PNG。模块二直接渲染这些已经完成配对的样本，不再重新提取画像或抽取负例：
+`artifacts/cd_prepare/` 下保存：
 
-```bash
-python -m optical_compression.build --samples artifacts/cd_prepare/datasets/train_candidates.jsonl --output artifacts/cd/train
-python -m optical_compression.build --samples artifacts/cd_prepare/datasets/valid_candidates.jsonl --output artifacts/cd/valid
-python -m optical_compression.build --samples artifacts/cd_prepare/datasets/test_candidates.jsonl --output artifacts/cd/test
-```
+| 路径 | 内容 |
+| --- | --- |
+| `filtered/` | 筛选交互、物品元数据与统计 |
+| `core/`、`natural_train/`、`sources/` | 检索器、时间目标、候选、历史与画像上下文 |
+| `item_requests/`、`profile_requests/` | 语义请求及来源；API 返回保存为 `*_results.jsonl` |
+| `items/`、`profiles/` | 通过校验的物品描述和用户画像 |
+| `datasets/train.jsonl`、`valid.jsonl`、`test.jsonl` | 自然命中组及其语义上下文 |
+| `datasets/*_candidates.jsonl` | 对应划分的逐候选记录，含 `user_context` 和 `candidate_payload`，交给模块二 |
+| `datasets/train_pairs.jsonl` | 一正一负的 SFT 配对与权重 |
+| `datasets/valid_all.jsonl`、`test_all.jsonl` | 含召回未命中的完整评估用户 |
+| `datasets/manifest.json` | 样本计数、召回率与文件校验信息 |
 
-随后将 `artifacts/cd/train/sft_pairs.jsonl` 交给 SFT，将 train 的 `candidates.jsonl` 交给 GRPO，将 valid/test 的完整候选交给固定模型评分。整体指标的用户分母必须取 `datasets/manifest.json` 的 `all_groups`；只统计命中子集不能代表全体用户结果。
-
-已有冻结候选和语义资产时，也可分别调用 `datasets collect / export` 或原 `prepare.py` 入口；完整参数见各入口的 `--help`。
+将整个 `datasets/` 目录交给[模块二](../optical_compression/README.md)。跨领域数据的调整位置见[根 README](../README.md#更换数据集)。

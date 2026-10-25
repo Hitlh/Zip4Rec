@@ -1,10 +1,6 @@
 """Join frozen natural candidates with validated history-only semantic assets."""
-import argparse
 import copy
 import math
-from pathlib import Path
-from .assets import load_profiles, load_validated_items, read_jsonl
-import json
 
 RECENT_MARKER = '\n\nRecent positive interactions (oldest to newest):\n'
 
@@ -35,22 +31,3 @@ def organize(group, profiles, items):
     row['messages'] = [{'role': 'user', 'content': [{'type': 'text',
         'text': profile + '\n\nCandidate music items:'}]}]
     return row
-
-
-def main():
-    p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('--groups', type=Path, required=True)
-    p.add_argument('--item-summaries', type=Path, required=True)
-    p.add_argument('--user-profiles', type=Path, required=True)
-    p.add_argument('--output', type=Path, required=True)
-    a = p.parse_args()
-    profiles, items = load_profiles(a.user_profiles), load_validated_items(a.item_summaries)
-    records = [organize(g, profiles, items) for g in read_jsonl(a.groups)]
-    a.output.parent.mkdir(parents=True, exist_ok=True)
-    with a.output.open('x') as stream:
-        for row in records:
-            stream.write(json.dumps(row, ensure_ascii=False) + '\n')
-
-
-if __name__ == '__main__':
-    main()

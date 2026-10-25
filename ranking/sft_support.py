@@ -1,16 +1,12 @@
 """Language-only LoRA and FP32 restricted output head, extracted from SFT helpers."""
 from __future__ import annotations
 import os, json
-from pathlib import Path
 from typing import Any
 import torch
-from peft import LoraConfig, TaskType, get_peft_model, prepare_model_for_kbit_training
-from transformers import Qwen3VLForConditionalGeneration, BitsAndBytesConfig, Trainer
+from peft import LoraConfig, TaskType, get_peft_model
+from transformers import Qwen3VLForConditionalGeneration, Trainer
 from torch.utils.data import SequentialSampler
-TARGET_SETS = {
- "qv": ("q_proj", "v_proj"),
- "all": ("q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"),
-}
+LANGUAGE_TARGETS = ("q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj")
 
 def verify_verbalizers(tokenizer: Any) -> list[int]:
     base = [
@@ -52,8 +48,8 @@ def verify_verbalizers(tokenizer: Any) -> list[int]:
     return token_ids
 
 
-def discover_language_targets(model: torch.nn.Module, target_set: str) -> list[str]:
-    suffixes = TARGET_SETS[target_set]
+def discover_language_targets(model: torch.nn.Module) -> list[str]:
+    suffixes = LANGUAGE_TARGETS
     targets = [
         name
         for name, module in model.named_modules()
@@ -75,34 +71,20 @@ def discover_language_targets(model: torch.nn.Module, target_set: str) -> list[s
 def load_model(args: argparse.Namespace, processor: Any) -> torch.nn.Module:
     load_kwargs: dict[str, Any] = {
         "dtype": torch.bfloat16,
-        "attn_implementation": args.attn_implementation,
+        "attn_implementation": "sdpa",
         "device_map": {"": int(os.environ.get("LOCAL_RANK", "0"))},
         "local_files_only": True,
         "trust_remote_code": True,
         "low_cpu_mem_usage": True,
     }
-    if args.method == "qlora":
-        load_kwargs["quantization_config"] = BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_quant_type="nf4",
-            bnb_4bit_compute_dtype=torch.bfloat16,
-            bnb_4bit_use_double_quant=True,
-        )
     model = Qwen3VLForConditionalGeneration.from_pretrained(str(args.model), **load_kwargs)
     model.config.use_cache = False
     model.config.pad_token_id = processor.tokenizer.pad_token_id
-    if args.method == "qlora":
-        model = prepare_model_for_kbit_training(
-            model,
-            use_gradient_checkpointing=True,
-            gradient_checkpointing_kwargs={"use_reentrant": False},
-        )
-    else:
-        model.gradient_checkpointing_enable(
-            gradient_checkpointing_kwargs={"use_reentrant": False}
-        )
-        model.enable_input_require_grads()
-    targets = discover_language_targets(model, args.target_set)
+    model.gradient_checkpointing_enable(
+        gradient_checkpointing_kwargs={"use_reentrant": False}
+    )
+    model.enable_input_require_grads()
+    targets = discover_language_targets(model)
     model = get_peft_model(
         model,
         LoraConfig(
@@ -126,18 +108,16 @@ def load_model(args: argparse.Namespace, processor: Any) -> torch.nn.Module:
     return model
 
 
-class RestrictedTrainer(Trainer):
+class DeltaTrainer(Trainer):
     def __init__(
         self,
         *args: Any,
         verbalizer_token_ids: list[int],
-        kl_coefficient: float,
         **kwargs: Any,
     ) -> None:
         super().__init__(*args, **kwargs)
         self.verbalizer_token_ids = verbalizer_token_ids
-        self.kl_coefficient = kl_coefficient
-        self.reference_probabilities: dict[int, torch.Tensor] = {}
+        self.reference_logits: dict[int, torch.Tensor] = {}
 
     def _get_train_sampler(self, train_dataset: Any | None = None) -> SequentialSampler:
         dataset = train_dataset if train_dataset is not None else self.train_dataset
@@ -167,9 +147,3 @@ class RestrictedTrainer(Trainer):
         if bias is not None:
             logits = logits + bias.index_select(0, ids).float()
         return logits
-
-
-class DeltaTrainer(RestrictedTrainer):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, kl_coefficient=0.0, **kwargs)
-        self.reference_logits = {}

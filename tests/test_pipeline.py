@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from semantic_context.assets import load_profiles, load_validated_items, read_jsonl
 from semantic_context.prepare import organize
-from optical_compression.build import build
+from optical_compression.build import materialize
 from optical_compression.selected.compact import render_compact
 from ranking.evaluate import evaluate
 from ranking.rerank import rerank
@@ -73,7 +73,8 @@ class PipelineTests(unittest.TestCase):
     def test_sft_pair_matches_grpo_replay_and_page_is_label_free(self):
         context = organize(self.group, self.profiles, self.items)
         with tempfile.TemporaryDirectory() as folder:
-            pairs, candidates, tasks = build([context], self.items, Path(folder))
+            _, samples = pointwise([context], self.items)
+            pairs, candidates, tasks = materialize(samples, Path(folder))
             self.assertEqual([r['label'] for r in pairs], ['A', 'B'])
             self.assertEqual(len(candidates), 10)
             self.assertEqual({r['sample_id'] for r in pairs},

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run portable Chat Completions JSONL against an OpenAI-compatible relay.
 
-Supports resumable synchronous execution and the official Files/Batch flow.
+Supports resumable synchronous execution and retry request preparation.
 No API key is accepted on the command line; credentials are read from an
 environment variable to avoid leaking them through process listings or logs.
 """
@@ -41,20 +41,6 @@ def parse_args() -> argparse.Namespace:
     sync.add_argument("--max-attempts", type=int, default=5)
     sync.add_argument("--min-interval", type=float, default=0.0)
     sync.add_argument("--workers", type=int, default=1)
-
-    submit = subparsers.add_parser("batch-submit", help="Upload a JSONL file and create a 24h batch")
-    submit.add_argument("--requests", type=Path, required=True)
-    submit.add_argument("--state", type=Path, required=True)
-    submit.add_argument("--description", default="Amazon-Music LLM profile experiment")
-
-    status = subparsers.add_parser("batch-status", help="Retrieve batch state")
-    status.add_argument("--batch-id", required=True)
-    status.add_argument("--output", type=Path, required=True)
-
-    download = subparsers.add_parser("batch-download", help="Download completed output and error files")
-    download.add_argument("--batch-id", required=True)
-    download.add_argument("--output", type=Path, required=True)
-    download.add_argument("--errors", type=Path)
 
     retry = subparsers.add_parser(
         "retry-input", help="Create a request JSONL containing missing or failed result IDs"
@@ -259,117 +245,6 @@ def require_new_file(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
 
 
-def post_json(client: httpx.Client, url: str, payload: dict[str, Any]) -> dict[str, Any]:
-    response = client.post(url, json=payload)
-    response.raise_for_status()
-    value = response.json()
-    if not isinstance(value, dict):
-        raise ValueError(f"Expected JSON object from {url}")
-    return value
-
-
-def batch_submit(args: argparse.Namespace) -> int:
-    require_new_file(args.state)
-    client, base_url = client_for(args)
-    try:
-        with args.requests.open("rb") as handle:
-            upload = client.post(
-                endpoint_url(base_url, "/v1/files"),
-                data={"purpose": "batch"},
-                files={"file": (args.requests.name, handle, "application/jsonl")},
-            )
-        upload.raise_for_status()
-        file_object = upload.json()
-        input_file_id = file_object["id"]
-        batch = post_json(
-            client,
-            endpoint_url(base_url, "/v1/batches"),
-            {
-                "input_file_id": input_file_id,
-                "endpoint": "/v1/chat/completions",
-                "completion_window": "24h",
-                "metadata": {"description": args.description},
-            },
-        )
-    finally:
-        client.close()
-    state = {
-        "requests_path": str(args.requests.resolve()),
-        "requests_sha256": sha256_file(args.requests),
-        "input_file": file_object,
-        "batch": batch,
-        "provider_metadata": {
-            "base_url_host": urlsplit(base_url).netloc,
-            "execution_mode": "batch",
-            "submitted_at_utc": datetime.now(timezone.utc).isoformat(),
-        },
-    }
-    args.state.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    print(json.dumps(state, ensure_ascii=False, indent=2))
-    return 0
-
-
-def retrieve_batch(client: httpx.Client, base_url: str, batch_id: str) -> dict[str, Any]:
-    response = client.get(endpoint_url(base_url, f"/v1/batches/{batch_id}"))
-    response.raise_for_status()
-    value = response.json()
-    if not isinstance(value, dict):
-        raise ValueError("Batch status response must be an object")
-    return value
-
-
-def batch_status(args: argparse.Namespace) -> int:
-    require_new_file(args.output)
-    client, base_url = client_for(args)
-    try:
-        batch = retrieve_batch(client, base_url, args.batch_id)
-    finally:
-        client.close()
-    args.output.write_text(json.dumps(batch, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    print(json.dumps(batch, ensure_ascii=False, indent=2))
-    return 0
-
-
-def download_file(client: httpx.Client, base_url: str, file_id: str, destination: Path) -> None:
-    require_new_file(destination)
-    with client.stream("GET", endpoint_url(base_url, f"/v1/files/{file_id}/content")) as response:
-        response.raise_for_status()
-        with destination.open("xb") as handle:
-            for chunk in response.iter_bytes():
-                handle.write(chunk)
-
-
-def batch_download(args: argparse.Namespace) -> int:
-    client, base_url = client_for(args)
-    try:
-        batch = retrieve_batch(client, base_url, args.batch_id)
-        output_file_id = batch.get("output_file_id")
-        if not output_file_id:
-            raise RuntimeError(f"Batch has no output_file_id; current status={batch.get('status')}")
-        download_file(client, base_url, output_file_id, args.output)
-        error_file_id = batch.get("error_file_id")
-        if error_file_id:
-            if not args.errors:
-                raise RuntimeError("Batch has an error file; pass --errors to preserve it")
-            download_file(client, base_url, error_file_id, args.errors)
-    finally:
-        client.close()
-    print(
-        json.dumps(
-            {
-                "batch_id": args.batch_id,
-                "status": batch.get("status"),
-                "output": str(args.output.resolve()),
-                "output_sha256": sha256_file(args.output),
-                "errors": str(args.errors.resolve()) if args.errors and args.errors.exists() else None,
-            },
-            ensure_ascii=False,
-            indent=2,
-        )
-    )
-    return 0
-
-
 def retry_input(args: argparse.Namespace) -> int:
     require_new_file(args.output)
     requests = read_jsonl(args.requests)
@@ -446,12 +321,6 @@ def main() -> int:
     args = parse_args()
     if args.command == "sync":
         return run_sync(args)
-    if args.command == "batch-submit":
-        return batch_submit(args)
-    if args.command == "batch-status":
-        return batch_status(args)
-    if args.command == "batch-download":
-        return batch_download(args)
     if args.command == "retry-input":
         return retry_input(args)
     raise AssertionError(args.command)

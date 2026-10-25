@@ -7,7 +7,6 @@ import argparse
 import gzip
 import json
 import random
-import sys
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -27,7 +26,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--interactions", type=Path, required=True)
     parser.add_argument("--item-metadata", type=Path, required=True)
-    parser.add_argument("--source-train-data", "--fullprofile-train", dest="fullprofile_train", type=Path, required=True)
+    parser.add_argument("--source-train-data", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--cutoffs", type=int, default=3)
     parser.add_argument("--seed", type=int, default=603759240)
@@ -72,10 +71,10 @@ def main() -> int:
     test = set(order[args.validation_users : args.validation_users + args.test_users])
     external_eval = validation | test
 
-    profiles = read_jsonl(args.fullprofile_train)
-    profile_by_key = {(str(row["user_id"]), str(row["target_item_id"])): row for row in profiles}
-    if len(profile_by_key) != len(profiles):
-        raise ValueError("duplicate user/target rows in fullprofile train")
+    sources = read_jsonl(args.source_train_data)
+    source_by_key = {(str(row["user_id"]), str(row["target_item_id"])): row for row in sources}
+    if len(source_by_key) != len(sources):
+        raise ValueError("duplicate user/target rows in source training data")
 
     selected: list[dict[str, Any]] = []
     round_reports: list[dict[str, Any]] = []
@@ -109,9 +108,9 @@ def main() -> int:
             rank = ranking.index(target.item_id) + 1
             if rank > 10:
                 continue
-            source = profile_by_key.get((user_id, target.item_id))
+            source = source_by_key.get((user_id, target.item_id))
             if source is None:
-                raise KeyError(f"missing profile row for cutoff={cutoff} user={user_id}")
+                raise KeyError(f"missing source row for cutoff={cutoff} user={user_id}")
             ranked_top10 = ranking[:10]
             if set(ranked_top10) & ({row.item_id for row in history} | future_other):
                 raise ValueError(f"seen/future item in Top-10: {user_id}")
@@ -159,7 +158,7 @@ def main() -> int:
             "all_targets_naturally_retrieved": all(not row["target_injected"] for row in selected),
             "all_groups_have_ten_unique_candidates": all(len(row["candidate_item_ids"]) == len(set(row["candidate_item_ids"])) == 10 for row in selected),
             "all_targets_in_candidates": all(row["target_item_id"] in row["candidate_item_ids"] for row in selected),
-            "all_profiles_found": len(selected) > 0,
+            "all_sources_found": len(selected) > 0,
         },
     }
     write_jsonl(args.output_dir / "natural_hit_groups.jsonl", selected)

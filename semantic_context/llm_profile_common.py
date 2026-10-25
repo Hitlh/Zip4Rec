@@ -133,7 +133,7 @@ def content_from_chat_completion_body(body: dict[str, Any]) -> str:
 
 
 def response_body_from_result(row: dict[str, Any]) -> dict[str, Any]:
-    """Accept official Batch rows and the local synchronous runner's same shape."""
+    """Read a synchronous request result or a direct chat-completion body."""
     response = row.get("response")
     if isinstance(response, dict):
         status_code = response.get("status_code")
@@ -425,7 +425,7 @@ def profile_user_prompt(items: list[dict[str, Any]]) -> str:
     )
 
 
-def make_batch_request(
+def make_request(
     *,
     custom_id: str,
     model: str,

@@ -21,7 +21,6 @@ def lr_multiplier(step, updates, warmup_ratio):
 def main():
     p = argparse.ArgumentParser()
     p.add_argument('--run', type=Path, required=True)
-    p.add_argument('--project', type=Path, default=Path('.'), help=argparse.SUPPRESS)
     p.add_argument('--pilot', action='store_true')
     p.add_argument('--resume', action='store_true')
     p.add_argument('--output-name')
@@ -68,7 +67,7 @@ def main():
     resumed = present[-1] if a.resume and present else None
     if (output / 'updates.jsonl').exists() and resumed is None:
         raise FileExistsError('unsaved training log exists; inspect before restarting')
-    model, encode, logits, fingerprint = setup(a.project, plan['base_model'], resumed or plan['initial_adapter'],
+    model, encode, logits, fingerprint = setup(plan['base_model'], resumed or plan['initial_adapter'],
         True, plan['seed'], config['gradient_checkpointing'])
     assert cache['base_fingerprint'] == fingerprint
     for group in groups:
@@ -79,19 +78,8 @@ def main():
     initial = {n: param.detach().cpu().clone() for n, param in params}
     optimizer = torch.optim.AdamW([param for _, param in params], lr=config['learning_rate'],
         betas=(.9, .999), eps=1e-8, weight_decay=0.)
-    sampling = config['objective_kind'] in ('ppo', 'grpo')
     generator = torch.Generator(device='cuda:0').manual_seed(plan['seed'])
-    critic, critic_optimizer = None, None
-    if config['objective_kind'] == 'ppo':
-        with torch.random.fork_rng(devices=[0]):
-            torch.manual_seed(plan['seed'] + 100)
-            critic = torch.nn.Sequential(torch.nn.Linear(21, 128), torch.nn.Tanh(), torch.nn.Linear(128, 1)).cuda().float()
-            torch.nn.init.zeros_(critic[-1].weight)
-            torch.nn.init.constant_(critic[-1].bias, .5)
-        critic_optimizer = torch.optim.AdamW(critic.parameters(), lr=config['critic_learning_rate'],
-            betas=(.9, .999), eps=1e-8, weight_decay=0.)
-        assert not {id(param) for _, param in params} & {id(param) for param in critic.parameters()}
-    step, cursor, elapsed_before, window, counts_before, critic_updates = 0, 0, 0., None, {}, 0
+    step, cursor, elapsed_before, window, counts_before = 0, 0, 0., None, {}
     if resumed:
         saved = torch.load(resumed / 'training_state.pt', map_location='cpu', weights_only=False)
         assert saved['protocol_sha256'] == digest(a.run / 'protocol.json')
@@ -101,10 +89,7 @@ def main():
         torch.set_rng_state(saved['torch_rng'])
         torch.cuda.set_rng_state_all(saved['cuda_rng'])
         step, cursor, elapsed_before = saved['step'], saved['groups'], saved['elapsed_seconds']
-        window, counts_before, critic_updates = saved['old_rollout_window'], saved['forward_counts'], saved['critic_updates']
-        if critic is not None:
-            critic.load_state_dict(saved['critic'])
-            critic_optimizer.load_state_dict(saved['critic_optimizer'])
+        window, counts_before = saved['old_rollout_window'], saved['forward_counts']
         log_rows = rows(output / 'updates.jsonl')
         if any(r['step'] > step for r in log_rows):
             suffix = str(time.time_ns())
@@ -118,7 +103,7 @@ def main():
                     ''.join(json.dumps(r) + '\n' for r in audit_rows if r['step'] > step))
             (output / 'rollout_audit.jsonl').write_text(''.join(json.dumps(r) + '\n' for r in audit_rows if r['step'] <= step))
     model.train()
-    errors, initial_kl = [], None
+    errors = []
     for row in groups[0]:
         encoded = encode(row)
         current = logits(encoded).float()
@@ -140,8 +125,6 @@ def main():
     write_json(output / 'run_config.json', {'created_utc': now(), 'training': config,
         'protocol_sha256': digest(a.run / 'protocol.json'), 'groups': len(groups), 'updates': updates,
         'checkpoints': checkpoints, 'trainable_parameters': sum(param.numel() for _, param in params),
-        'critic_parameters': sum(param.numel() for param in critic.parameters()) if critic is not None else 0,
-        'critic_initialization': 'zero output weights, output bias 0.5; no label-dependent pretraining',
         'reference_fingerprint': fingerprint, 'resumed_from': str(resumed) if resumed else None})
     torch.cuda.reset_peak_memory_stats()
     started = time.monotonic()
@@ -154,7 +137,7 @@ def main():
         return torch.stack(values)
     with (output / 'updates.jsonl').open('a') as stream, (output / 'rollout_audit.jsonl').open('a') as audit_stream:
         while cursor < len(groups):
-            if sampling and (window is None or cursor >= window['end']):
+            if window is None or cursor >= window['end']:
                 window_start, window_end = cursor, min(cursor + config['rollout_window_groups'], len(groups))
                 old_rollouts = []
                 with torch.no_grad():
@@ -162,19 +145,18 @@ def main():
                         delta = group_delta(group)
                         old_logits = policy_logits(delta[:, 0] - delta[:, 1], delta.new_tensor([r['candidate_score'] for r in group]), config['policy_mode'])
                         positive = next(i for i, r in enumerate(group) if r['label'] == 'A')
-                        old_rollouts.append(make_rollout(old_logits, positive, config, generator, critic))
+                        old_rollouts.append(make_rollout(old_logits, positive, config, generator))
                 window = {'start': window_start, 'end': window_end, 'actor_step': step,
-                    'group_ids': [g[0]['group_id'] for g in groups[window_start:window_end]], 'rollouts': old_rollouts,
-                    'old_critic_state': {k: v.detach().cpu().clone() for k, v in critic.state_dict().items()} if critic is not None else None}
+                    'group_ids': [g[0]['group_id'] for g in groups[window_start:window_end]], 'rollouts': old_rollouts}
             end = min(cursor + config['groups_per_update'], len(groups))
             batch = groups[cursor:end]
             optimizer.zero_grad(set_to_none=True)
-            infos, critic_inputs, critic_targets, old_predictions, audit_groups = [], [], [], [], []
+            infos, audit_groups = [], []
             for offset, group in enumerate(batch):
                 delta = group_delta(group)
                 positive = next(i for i, r in enumerate(group) if r['label'] == 'A')
                 negative = next(i for i, r in enumerate(group) if r['label'] == 'B' and r['_replay'])
-                rollout = window['rollouts'][cursor + offset - window['start']] if sampling else None
+                rollout = window['rollouts'][cursor + offset - window['start']]
                 loss, info = objective(delta, delta.new_tensor([references[r['sample_id']]['condition_score'] for r in group]),
                     delta.new_tensor([r['candidate_score'] for r in group]), positive, negative,
                     group[negative]['_replay_weight'], config, [r['candidate_item_id'] for r in group], rollout)
@@ -183,17 +165,10 @@ def main():
                     'positive': positive, 'current_logits': policy_logits(delta[:, 0] - delta[:, 1],
                         delta.new_tensor([r['candidate_score'] for r in group]), config['policy_mode']).detach().cpu().tolist(),
                     'task_loss': info['task_loss']}
-                if sampling:
-                    audit_group['rollout'] = {k: rollout[k].tolist() for k in ['permutations', 'reward', 'old_logp', 'old_values', 'advantages', 'old_logits']}
+                audit_group['rollout'] = {k: rollout[k].tolist() for k in ['permutations', 'reward', 'old_logp', 'advantages', 'old_logits']}
                 audit_groups.append(audit_group)
                 (loss / len(batch)).backward()
                 infos.append(info)
-                if critic is not None:
-                    features = rollout['critic_features'][:, :-1].reshape(-1, 21)
-                    assert not features.requires_grad
-                    critic_inputs.append(features)
-                    critic_targets.append(rollout['reward'][:, None].expand(-1, 9).reshape(-1))
-                    old_predictions.append(rollout['old_values'][:, :-1].reshape(-1))
                 del delta, loss
                 if torch.cuda.max_memory_allocated() > config['memory_ceiling_gib'] * 1024 ** 3:
                     raise MemoryError('training memory ceiling exceeded')
@@ -205,41 +180,21 @@ def main():
             optimizer.step()
             metrics = {k: sum(info[k] for info in infos) / len(infos) for k in infos[0]}
             metrics['ratio_max_abs_deviation'] = max(info.get('ratio_max_abs_deviation', 0.) for info in infos)
-            if critic is not None:
-                x = torch.cat(critic_inputs).cuda()
-                target = torch.cat(critic_targets).cuda().float()
-                old_v = torch.cat(old_predictions).cuda().float()
-                critic_optimizer.zero_grad(set_to_none=True)
-                prediction = critic(x).squeeze(-1)
-                value_loss = torch.nn.functional.mse_loss(prediction, target)
-                (config['value_loss_coefficient'] * value_loss).backward()
-                assert all(param.grad is not None and torch.isfinite(param.grad).all() for param in critic.parameters())
-                critic_norm = float(torch.nn.utils.clip_grad_norm_(critic.parameters(), config['critic_max_grad_norm']))
-                critic_optimizer.step()
-                critic_updates += 1
-                variance = target.var(unbiased=False)
-                ev = lambda pred: float(1 - (target - pred).var(unbiased=False) / variance) if float(variance) > 1e-12 else 0.
-                metrics.update(value_loss=float(value_loss.detach()), value_explained_variance=ev(prediction.detach()),
-                    old_value_explained_variance=ev(old_v), critic_grad_norm=critic_norm,
-                    critic_updates=critic_updates, critic_weighted_loss=float(value_loss.detach()) * config['value_loss_coefficient'])
             step, cursor = step + 1, end
             forward_counts = {k: counts_before.get(k, 0) + v for k, v in logits.counts.items()}
             metrics.update(step=step, epoch=1, groups=cursor, batch_groups=len(batch), grad_norm=norm,
                 clipped=float(norm > config['max_grad_norm']), clip_multiplier=min(1., config['max_grad_norm'] / norm),
                 learning_rate=optimizer.param_groups[0]['lr'], elapsed_seconds=elapsed_before + time.monotonic() - started,
                 peak_cuda_memory_bytes=torch.cuda.max_memory_allocated(), **forward_counts,
-                rollout_window_start=window['start'] if sampling else -1,
-                rollout_old_actor_step=window['actor_step'] if sampling else -1,
-                total_sampled_permutations=(window['end'] * config['samples_per_group']) if sampling else 0)
+                rollout_window_start=window['start'],
+                rollout_old_actor_step=window['actor_step'],
+                total_sampled_permutations=window['end'] * config['samples_per_group'])
             if step == 1 and not resumed:
                 assert abs(metrics['kl']) < 1e-9
-                if config['objective_kind'] == 'candidate_dpo':
-                    assert abs(metrics['task_loss'] - math.log(2)) < 1e-7
-                if sampling:
-                    assert metrics['ratio_max_abs_deviation'] < 1e-7
+                assert metrics['ratio_max_abs_deviation'] < 1e-7
             stream.write(json.dumps(metrics) + '\n'); stream.flush()
-            audit_stream.write(json.dumps({'step': step, 'old_actor_step': window['actor_step'] if sampling else -1,
-                                           'window_start': window['start'] if sampling else -1, 'groups': audit_groups}) + '\n')
+            audit_stream.write(json.dumps({'step': step, 'old_actor_step': window['actor_step'],
+                                           'window_start': window['start'], 'groups': audit_groups}) + '\n')
             audit_stream.flush()
             write_json(output / 'live_state.json', metrics)
             if step == 1 or step % 10 == 0 or a.pilot:
@@ -253,12 +208,10 @@ def main():
                     'torch_rng': torch.get_rng_state(), 'cuda_rng': torch.cuda.get_rng_state_all(),
                     'step': step, 'groups': cursor, 'elapsed_seconds': metrics['elapsed_seconds'],
                     'protocol_sha256': digest(a.run / 'protocol.json'), 'group_order': [g[0]['group_id'] for g in groups],
-                    'old_rollout_window': window, 'forward_counts': forward_counts, 'critic_updates': critic_updates,
-                    'critic': critic.state_dict() if critic is not None else None,
-                    'critic_optimizer': critic_optimizer.state_dict() if critic is not None else None}
+                    'old_rollout_window': window, 'forward_counts': forward_counts}
                 torch.save(state, pending / 'training_state.pt')
                 write_json(pending / 'trainer_state.json', {'global_step': step, 'max_steps': updates,
-                    'groups': cursor, 'epoch': cursor / len(groups), 'old_rollout_window_preserved': sampling,
+                    'groups': cursor, 'epoch': cursor / len(groups), 'old_rollout_window_preserved': True,
                     'protocol_sha256': digest(a.run / 'protocol.json')})
                 if cp.exists():
                     cp.rename(output / f'incomplete-checkpoint-{step}-{time.time_ns()}')
@@ -269,7 +222,7 @@ def main():
         'epochs': 1, 'parameter_change_l2_since_loaded_adapter': change,
         'seconds': elapsed_before + time.monotonic() - started,
         'peak_cuda_memory_bytes': torch.cuda.max_memory_allocated(), 'forward_counts': forward_counts,
-        'critic_updates': critic_updates, 'sampled_permutations': len(groups) * config['samples_per_group'] if sampling else 0,
+        'sampled_permutations': len(groups) * config['samples_per_group'],
         'checkpoint_sha256': {str(s): digest(output / f'checkpoint-{s}/adapter_model.safetensors') for s in checkpoints}})
     print('training complete', step, 'updates', flush=True)
 

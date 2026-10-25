@@ -1,6 +1,5 @@
 """Train fresh SFT and GRPO adapters, select on validation, then evaluate locked models."""
 import argparse
-import json
 import math
 import sys
 from pathlib import Path

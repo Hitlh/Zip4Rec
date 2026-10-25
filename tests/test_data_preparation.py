@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 from semantic_context.filter_data import iterative_kcore
 from semantic_context.datasets import audit_source, collect, export
@@ -118,8 +119,40 @@ class DataPreparationTests(unittest.TestCase):
         self.assertEqual(endpoint_url('https://provider.example/v1', '/v1/chat/completions'),
                          'https://provider.example/v1/chat/completions')
 
+    @unittest.skipUnless(importlib.util.find_spec('httpx'), 'request runner requires httpx')
+    def test_synchronous_requests_resume_and_retry_failed_or_invalid_results(self):
+        import httpx
+        from semantic_context.run_requests import run_sync, retry_input
+        with tempfile.TemporaryDirectory() as folder:
+            p = Path(folder)
+            requests, results = p / 'requests.jsonl', p / 'results.jsonl'
+            write_rows(requests, [dict(custom_id=str(i), method='POST', url='/v1/chat/completions',
+                body=dict(model='fixture', messages=[], metadata=dict(id=i))) for i in range(3)])
+            calls = []
+            def handle(request):
+                self.assertEqual(str(request.url), 'https://provider.example/v1/chat/completions')
+                index = json.loads(request.content)['metadata']['id']
+                calls.append(index)
+                return httpx.Response(200 if index != 1 else 400,
+                    json=dict(choices=[dict(message=dict(content='{}'))]))
+            args = argparse.Namespace(requests=requests, output=results, max_attempts=1,
+                workers=2, limit=None, min_interval=0.)
+            for _ in range(2):
+                with patch('semantic_context.run_requests.client_for', return_value=(
+                        httpx.Client(transport=httpx.MockTransport(handle)), 'https://provider.example/v1')):
+                    status = run_sync(args)
+            self.assertEqual(sorted(calls), [0, 1, 2])
+            self.assertEqual(status, 0)  # Second run has no pending requests.
+            self.assertEqual(len(read_jsonl(results)), 3)
+            failures = p / 'failures.jsonl'
+            write_rows(failures, [dict(custom_id='2')])
+            retry = p / 'retry.jsonl'
+            retry_input(argparse.Namespace(requests=requests, results=results,
+                validation_failures=failures, output=retry))
+            self.assertEqual([r['custom_id'] for r in read_jsonl(retry)], ['1', '2'])
+
     @unittest.skipUnless(importlib.util.find_spec('torch'), 'CPU LightGCN integration requires PyTorch')
-    def test_raw_to_final_three_split_pipeline_without_network(self):
+    def test_raw_to_semantics_densepages_and_metrics_without_network(self):
         with tempfile.TemporaryDirectory() as folder:
             p = Path(folder)
             reviews, metadata = p / 'reviews.jsonl', p / 'metadata.jsonl'
@@ -164,6 +197,26 @@ class DataPreparationTests(unittest.TestCase):
             self.assertEqual(len(pairs), manifest['splits']['train']['natural_hit_groups'] * 2)
             self.assertEqual(sum(r['label'] == 'A' for r in pairs), len(pairs) // 2)
             self.assertTrue(all('user_context' in r and 'candidate_payload' in r for r in pairs))
+            # Verify the module boundary using actual freshly prepared records
+            # and Pillow images, without an API, processor, or model weights.
+            dense = p / 'densepage'
+            subprocess.run([sys.executable, '-m', 'optical_compression.pipeline',
+                '--datasets', str(work / 'datasets'), '--output', str(dense)],
+                cwd=ROOT, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            from ranking.evaluate import evaluate
+            for split in ['train', 'valid', 'test']:
+                candidates = read_jsonl(dense / split / 'candidates.jsonl')
+                self.assertEqual(len(candidates), manifest['splits'][split]['natural_hit_groups'] * 10)
+                self.assertTrue(all(Path(row['densepage_path']).is_file() for row in candidates))
+                rendered_pairs = read_jsonl(dense / split / 'sft_pairs.jsonl')
+                self.assertEqual({row['sample_id'] for row in rendered_pairs},
+                                 {row['sample_id'] for row in candidates if row['_replay']})
+                if split != 'train':
+                    scores = [dict(row, condition_score=0.) for row in candidates]
+                    result = evaluate(scores, alpha=0., all_users=manifest['splits'][split]['all_groups'])
+                    recall = manifest['splits'][split]['natural_hit_groups'] / manifest['splits'][split]['all_groups']
+                    self.assertAlmostEqual(result['end_to_end_fused']['NDCG@10'],
+                                           result['fused']['NDCG@10'] * recall)
             source = work / 'sources/train_sources.jsonl'
             source.write_text(source.read_text() + '\n')
             with self.assertRaises(ValueError):

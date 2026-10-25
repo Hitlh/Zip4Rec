@@ -1,4 +1,4 @@
-"""Candidate PL PPO/GRPO with per-action old probabilities and frozen advantages."""
+"""Candidate PL GRPO with per-action old probabilities and frozen advantages."""
 import math
 import torch
 import torch.nn.functional as F
@@ -43,40 +43,20 @@ def permutation_rewards(permutations, positive):
     return 1 / torch.log2(ranks.double() + 1)
 
 
-def critic_features(old_logits, permutations):
-    """Pre-action observations: scores, remaining mask, normalized step; no labels."""
-    k, n = permutations.shape
-    # Counts are integers. Floating CUDA cumsum is rejected in strict deterministic mode.
-    chosen = F.one_hot(permutations, n)
-    before = chosen.cumsum(1) - chosen
-    remaining = (1 - before).to(old_logits.dtype)
-    steps = torch.arange(n, device=old_logits.device, dtype=old_logits.dtype) / max(1, n - 1)
-    return torch.cat((old_logits[None, None].expand(k, n, n), remaining,
-                      steps[None, :, None].expand(k, n, 1)), -1).detach().float()
-
-
-def make_rollout(old_logits, positive, config, generator, critic=None):
+def make_rollout(old_logits, positive, config, generator):
+    if config['objective_kind'] != 'grpo':
+        raise ValueError('only the GRPO objective is supported')
     with torch.no_grad():
         permutations = sample_permutations(old_logits, config['samples_per_group'], generator,
                                            config['temperature'])
         reward = permutation_rewards(permutations, positive)
         old_logp = action_log_probs(old_logits, permutations, config['temperature'])
-        features = critic_features(old_logits.detach(), permutations)
-        values = (critic(features).squeeze(-1).double() if critic is not None
-                  else torch.zeros_like(old_logp))
-        if config['objective_kind'] == 'ppo':
-            assert config['gamma'] == config['gae_lambda'] == 1
-            advantage = reward[:, None] - values
-        elif config['objective_kind'] == 'grpo':
-            std = reward.std(unbiased=False)
-            relative = (torch.zeros_like(reward) if float(std) == 0.
-                        else (reward - reward.mean()) / (std + 1e-6))
-            advantage = relative[:, None].expand_as(old_logp)
-        else:
-            raise ValueError(config['objective_kind'])
+        std = reward.std(unbiased=False)
+        relative = (torch.zeros_like(reward) if float(std) == 0.
+                    else (reward - reward.mean()) / (std + 1e-6))
+        advantage = relative[:, None].expand_as(old_logp)
         result = {'permutations': permutations, 'reward': reward, 'old_logp': old_logp,
-                  'old_values': values, 'advantages': advantage, 'critic_features': features,
-                  'old_logits': old_logits}
+                  'advantages': advantage, 'old_logits': old_logits}
         return {name: value.detach().cpu() for name, value in result.items()}
 
 
@@ -87,7 +67,7 @@ def clipped_task(logits, rollout, temperature=1., epsilon=.2):
     advantage = rollout['advantages'].detach().to(current)[:, :-1]
     ratio = (current - old).exp()
     surrogate = torch.minimum(ratio * advantage, ratio.clamp(1 - epsilon, 1 + epsilon) * advantage)
-    # Sum effective actions, mean trajectories. A separate mean over users is applied by train.py.
+    # Sum effective actions, mean trajectories; train_grpo.py averages over users.
     task = -surrogate.sum(-1).mean()
     info = {'ratio_mean': float(ratio.detach().mean()),
             'ratio_max_abs_deviation': float((ratio.detach() - 1).abs().max()),
@@ -99,33 +79,18 @@ def clipped_task(logits, rollout, temperature=1., epsilon=.2):
 
 
 def objective(delta, reference_scores, retriever_scores, positive, replay_negative,
-              replay_weight, config, candidate_ids, rollout=None):
+              replay_weight, config, candidate_ids, rollout):
+    if config['objective_kind'] != 'grpo':
+        raise ValueError('only the GRPO objective is supported')
     scores = delta[:, 0] - delta[:, 1]
     logits = policy_logits(scores, retriever_scores, config['policy_mode'])
     ref = policy_logits(reference_scores.detach().to(scores), retriever_scores, config['policy_mode']).detach()
-    kind = config['objective_kind']
-    info = {}
-    if kind == 'exact_ndcg':
+    task, info = clipped_task(logits, rollout, config['temperature'], config['clip_epsilon'])
+    reward = rollout['reward']
+    info.update(sample_reward=float(reward.mean()), sample_reward_std=float(reward.std(unbiased=False)),
+                zero_variance_group=float(float(reward.std(unbiased=False)) == 0.))
+    with torch.no_grad():
         expected = expected_ndcg(logits, positive, config['temperature'])
-        task = -expected
-    elif kind == 'candidate_dpo':
-        logp = F.log_softmax(logits / config['temperature'], 0)
-        logref = F.log_softmax(ref / config['temperature'], 0)
-        mask = torch.arange(len(scores), device=scores.device) != positive
-        margin = config['dpo_beta'] * ((logp[positive] - logp[mask]) - (logref[positive] - logref[mask]))
-        task = -F.logsigmoid(margin).mean()
-        info.update(dpo_margin_mean=float(margin.detach().mean()))
-        with torch.no_grad():
-            expected = expected_ndcg(logits, positive, config['temperature'])
-    elif kind in ('ppo', 'grpo'):
-        task, info = clipped_task(logits, rollout, config['temperature'], config['clip_epsilon'])
-        reward = rollout['reward']
-        info.update(sample_reward=float(reward.mean()), sample_reward_std=float(reward.std(unbiased=False)),
-                    zero_variance_group=float(float(reward.std(unbiased=False)) == 0.))
-        with torch.no_grad():
-            expected = expected_ndcg(logits, positive, config['temperature'])
-    else:
-        raise ValueError(kind)
     logp = F.log_softmax(logits / config['temperature'], 0)
     logref = F.log_softmax(ref / config['temperature'], 0)
     kl = (logp.exp() * (logp - logref)).sum()

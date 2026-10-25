@@ -1,20 +1,38 @@
-# 模块二：历史信息光学压缩
+# 模块二：光学压缩
 
-本模块分为一次性的**排版选择**和后续的**固定代码渲染**：
+先用视觉 agent 为数据集选出排版代码，再固定该代码批量生成 DensePage，作为模块三的训练与评分输入。
+
+## 工作流程与代码
 
 ```text
-模块一的真实训练语义样本
-  → 视觉 agent 搜索排版代码、看图、测量 token、检查回读
-  → 保存选中的 frozen/layout.py、冻结清单和字体
-  → 后续只调用选中的代码，生成 train / valid / test 图片与图文输入
-  → 模块三 SFT / GRPO
+模块一 train_candidates.jsonl
+  → 抽取十条真实训练样本 → agent 修改排版、看图、测量与回读
+  → frozen/layout.py + 字体 + 配置
+  → 固定调用选中代码 → train / valid / test 图片与图文数据
 ```
 
-图片用于模型训练。agent 需要兼顾可识别性、字段结构与 token 成本，不能为少量 token 收益牺牲阅读清晰度。页面始终为上方用户、下方物品的单列布局；字体、字号、大标题、蓝绿分区栏和原文内容保留。行高、间距、换行、字段分组等规则可以搜索，不强制 16px。选中策略在所有后续划分中固定使用。
+页面固定为上方用户、下方物品的单列布局。字体、字号、大标题和蓝绿分区栏保持不变，允许搜索宽度、行高、留白、换行和字段分组。图片用于 SFT/GRPO 训练，搜索同时考虑文字可识别性、字段结构和 token 成本。
 
-## 1. 搜索一次并保存选中代码
+| 文件或目录 | 作用 |
+| --- | --- |
+| `optimize.py` | 一次性排版搜索入口 |
+| `optimizer/agent.py` | 视觉模型 HTTP 客户端、提示词与工具调用循环 |
+| `optimizer/tools.py` | 四个工具、候选评估、选优和固定代码导出 |
+| `layouts/initial.py` | 简单上下分区的初始排版 |
+| `document.py` | 整理无标签页面文字、纯文本基线与十条训练样本 |
+| `layout_engine.py`、`layout_worker.py` | 执行排版代码、检查内容/几何、绘制固定装饰与页面 |
+| `presentation.py` | 字段分组、标签和分隔符处理 |
+| `measurement.py` | 实际 processor token 测量与本地 VLM 回读 |
+| `selected/compact.py`、`selected/selection.json` | 已选中的 CD compact 排版代码及选择标记 |
+| `strategy.py` | 加载选中代码，供批量入口调用 |
+| `build.py` | 为一个划分生成图片、候选输入和 SFT 配对 |
+| `measure_tokens.py` | 检查实际图文输入 token 和长度上限 |
+| `pipeline.py` | 对三个划分执行固定代码渲染与 token 检查 |
+| `fonts/` | 固定字体及许可 |
 
-配置视觉服务的 `OPENAI_BASE_URL`、`OPENAI_API_KEY`，在 [`layout_optimizer.json`](../configs/cd_lightgcn/layout_optimizer.json) 中填写支持图片和工具调用的模型名称及预算：
+## 1. 搜索一次排版
+
+按[根 README](../README.md) 设置 API，修改 [layout_optimizer.json](../configs/cd_lightgcn/layout_optimizer.json) 中的视觉模型与预算，从仓库根目录运行：
 
 ```bash
 python -m optical_compression.optimize \
@@ -24,18 +42,11 @@ python -m optical_compression.optimize \
   --output artifacts/layout_cd_search
 ```
 
-只使用十条去标签真实训练样本，不读取验证/测试结果。agent 依次提交完整 Python 排版程序、渲染并查看真实图片、测量目标 processor 的真实 token、检查本地 VLM 回读。默认每条样本两个区域的回读相似度都须达到 90%，且图片总输入 token 严格少于纯文本；合格并经 agent 看图的候选才会导出：
+输入至少需要十条不同的真实训练页面。默认要求十条样本的用户/物品区域回读相似度均 ≥90%，图像总输入 token 逐条严格少于对应纯文本，并满足 2048 长度上限。搜索需要视觉 API，本地回读需要 Qwen3-VL 权重和 GPU。
 
-```text
-artifacts/layout_cd_search/frozen/
-├── layout.py        # 选中的通用排版代码
-├── layout.json      # 合格条件、来源、评估与源码/引擎/字体指纹
-└── fonts/           # 固定正文与粗体字体、许可
-```
+成功后导出 `artifacts/layout_cd_search/frozen/`，含 `layout.py`、`layout.json` 和 `fonts/`；无合格候选则停止。四个工具的实现见 [optimizer/tools.py](optimizer/tools.py)，搜索参数见 [layout_optimizer.json](../configs/cd_lightgcn/layout_optimizer.json)。
 
-没有合格候选时明确失败，不生成选中代码。搜索需要视觉 API；默认回读需要本地模型权重和 GPU。工具接口、排版规则、转写门槛和预算见 [agent 说明](optimizer/README.md)。
-
-## 2. 后续只调用选中代码
+## 2. 固定代码批量生成
 
 ```bash
 python -m optical_compression.pipeline \
@@ -45,47 +56,12 @@ python -m optical_compression.pipeline \
   --output artifacts/cd_densepage
 ```
 
-这个入口不调用 agent，不需要 API 凭证。它读取选中代码并对三个数据划分批量渲染，生成图文记录，调用实际 processor 检查 token 与长度；冻结策略还会逐条检查严格少于纯文本。此时不加载 VLM 权重，也不重新执行回读。源代码、字体、引擎或 processor 不匹配时拒绝继续，避免搜索和批量运行混用不同策略。
+本步骤只调用选中代码，使用 processor 检查实际 token；不再搜索或回读。选中代码与字体固定用于训练、验证和测试三个划分，内容不得截断。
 
-每个划分输出 `images/`、`candidates.jsonl`、`sft_pairs.jsonl`、`actual_tokens.json` 和 manifest。完整根目录可直接交给模块三。省略 `--model` 仅用于 CPU 渲染检查，模块三完整训练入口会要求实际 processor 验证。
+仓库已选中的 CD 代码为 [selected/compact.py](selected/compact.py)，直接复用时将上面命令的 `--layout` 改为 `optical_compression/selected`，见[调用说明](selected/README.md)。
 
-## 当前仓库已选中：compact
+## 输出与下一步
 
-[`selected/compact.py`](selected/compact.py) 单独保存项目选定的 CD compact 代码，[`selected/selection.json`](selected/selection.json) 标记其为当前选中策略，后续直接调用。
+每个划分目录生成 `images/`、`candidates.jsonl`、`sft_pairs.jsonl`、`actual_tokens.json` 和 `manifest.json`，根目录生成 `complete.json`。将整个 `artifacts/cd_densepage/` 和模块一的 `datasets/` 交给[模块三](../ranking/README.md)。
 
-使用这个已经选好的版本时，直接执行第 2 步，将 `--layout` 指向：
-
-```bash
-python -m optical_compression.pipeline \
-  --datasets artifacts/cd_prepare/datasets \
-  --layout optical_compression/selected \
-  --model data/models/Qwen3-VL-8B-Instruct \
-  --output artifacts/cd_densepage
-```
-
-省略 `--layout` 也会加载这个选定目录。原 compact 保留其 640px 宽度、14px 正文、16px 行高和 32px 高度对齐。批量运行会检查实际 processor token 和输入长度。详见 [选中代码说明](selected/README.md)。
-
-## 从原始数据自动运行整个项目
-
-```bash
-# 语义数据准备完成后先调用 agent，再固定选中代码进行渲染和训练。
-python run_pipeline.py --config configs/cd_lightgcn/pipeline_agent.json
-
-# 复用仓库已选好的 compact，直接渲染并复现原 CD 训练流程。
-python run_pipeline.py --config configs/cd_lightgcn/pipeline.json
-```
-
-`layout_optimizer_config` 指定一次性搜索配置；`layout_strategy` 指定已经选好的目录。两者互斥。完整入口在训练语义集产生后执行搜索，将结果保存在 `layout_search/frozen/`，后续只传递该目录。已完成且指纹未变的选择阶段可复用；批量渲染自身始终不触发搜索。
-
-## 数据组织
-
-`build.py` 读取模块一导出的 `*_candidates.jsonl`，调用选中代码，生成完整十候选组以及确定性的正负 SFT 配对；配对和权重逻辑统一在 `semantic_context/samples.py`。旧的 `--groups` 和 `--item-summaries` 输入也保留。
-
-```bash
-python -m optical_compression.build \
-  --samples artifacts/cd_prepare/datasets/train_candidates.jsonl \
-  --layout optical_compression/selected \
-  --output artifacts/cd_densepage/train
-```
-
-记录包含图像绝对路径，移动资产后应重新构建模型输入与缓存。`estimated_visual_tokens` 只是原 compact 的几何估计，实际输入 token 以目标 processor 测量结果为准。原始数据、处理数据、搜索记录、生成图片和训练结果均留在本地，不随仓库发布。
+图文记录使用图片绝对路径，移动图片后需重新构建输入。后续训练要求本步骤提供 `--model` 并通过实际 processor 检查。

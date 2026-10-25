@@ -16,7 +16,7 @@ def cache_key(plan, split, row):
 
 
 def main():
-    p=argparse.ArgumentParser();p.add_argument('--run',type=Path,required=True);p.add_argument('--project',type=Path,default=Path('.'),help=argparse.SUPPRESS)
+    p=argparse.ArgumentParser();p.add_argument('--run',type=Path,required=True)
     a=p.parse_args();plan=read_json(a.run/'protocol.json');prepared=Path(plan['prepared']);prepared.mkdir(parents=True,exist_ok=True)
     lock=(prepared/'prepare.lock').open('a');fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
     for name,h in plan['code_sha256'].items():assert digest(Path(__file__).parent/name)==h,name
@@ -25,7 +25,7 @@ def main():
         for split,h in saved['reference_sha256'].items():assert digest(prepared/f'{split}.jsonl')==h
         assert digest(prepared/'base.json')==saved['base_cache_sha256'];return
     adapter=Path(plan['initial_adapter']);assert digest(adapter/'adapter_model.safetensors')==plan['initial_adapter_sha256']
-    model,encode,logits,fingerprint=setup(a.project,plan['base_model'],adapter)
+    model,encode,logits,fingerprint=setup(plan['base_model'],adapter)
     cache_path=prepared/'base.json'
     cache=read_json(cache_path) if cache_path.exists() else dict(base_fingerprint=fingerprint,namespace=plan['experiment'],
         SFT_adapter_sha256=plan['initial_adapter_sha256'],records={})

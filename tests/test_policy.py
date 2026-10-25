@@ -10,14 +10,14 @@ except ModuleNotFoundError:
 
 if torch is not None:
     from ranking.exact_policy import expected_ndcg
-    from ranking.policy import (action_log_probs, clipped_task, critic_features, make_rollout, objective,
+    from ranking.policy import (action_log_probs, clipped_task, make_rollout, objective,
                                 permutation_rewards, policy_logits, sample_permutations)
 
 
-def config(kind='grpo', mode='dense'):
-    return {'objective_kind': kind, 'policy_mode': mode, 'samples_per_group': 4,
-        'temperature': 1., 'gamma': 1., 'gae_lambda': 1., 'clip_epsilon': .2,
-        'kl_coefficient': .02, 'sft_coefficient': .1, 'dpo_beta': .15}
+def config(mode='fused'):
+    return {'objective_kind': 'grpo', 'policy_mode': mode, 'samples_per_group': 4,
+        'temperature': 1., 'clip_epsilon': .2,
+        'kl_coefficient': .02, 'sft_coefficient': .1}
 
 
 @unittest.skipUnless(torch is not None, "policy tests require PyTorch")
@@ -74,22 +74,20 @@ class PolicyTests(unittest.TestCase):
             else:
                 self.assertGreater(float(g.grad.norm()), 0.)
 
-    def test_modes_dpo_initialization_and_prior_cancellation(self):
+    def test_grpo_initialization_and_policy_modes(self):
         delta = torch.tensor([[.2, -.2], [.5, -.1], [-.2, .7]], dtype=torch.float64, requires_grad=True)
         score = delta[:, 0] - delta[:, 1]
         prior1, prior2 = torch.tensor([1., 2., 3.]), torch.tensor([10., -8., .3])
         self.assertTrue(torch.equal(policy_logits(score, prior1, 'dense'), policy_logits(score, prior2, 'dense')))
-        cfg = config('candidate_dpo')
-        loss, info = objective(delta, score.detach(), prior1, 0, 1, .4, cfg, ['a', 'b', 'c'])
-        self.assertAlmostEqual(info['task_loss'], math.log(2), places=13)
-        self.assertAlmostEqual(info['kl'], 0., places=13)
-        cfg['policy_mode'] = 'fused'
-        reference = score.detach() + torch.tensor([.1, -.2, .4])
-        _, info1 = objective(delta, reference, prior1, 0, 1, .4, cfg, ['a', 'b', 'c'])
-        _, info2 = objective(delta, reference, prior2, 0, 1, .4, cfg, ['a', 'b', 'c'])
-        self.assertAlmostEqual(info1['task_loss'], info2['task_loss'], places=13)
-        loss.backward()
-        self.assertTrue(torch.isfinite(delta.grad).all())
+        self.assertFalse(torch.equal(policy_logits(score, prior1, 'fused'), policy_logits(score, prior2, 'fused')))
+        for mode in ['dense', 'fused']:
+            cfg = config(mode)
+            logits = policy_logits(score, prior1, mode)
+            rollout = make_rollout(logits, 0, cfg, torch.Generator().manual_seed(7))
+            loss, info = objective(delta, score.detach(), prior1, 0, 1, .4, cfg, ['a', 'b', 'c'], rollout)
+            self.assertAlmostEqual(info['kl'], 0., places=13)
+            self.assertAlmostEqual(info['ratio_max_abs_deviation'], 0., places=13)
+            self.assertTrue(torch.isfinite(torch.autograd.grad(loss, delta, retain_graph=True)[0]).all())
 
     def test_grpo_population_std_and_zero_variance(self):
         g = torch.tensor([.2, -.3, .1], dtype=torch.float64)
@@ -100,60 +98,38 @@ class PolicyTests(unittest.TestCase):
         zero = make_rollout(torch.tensor([100., -100.]), 0, config(), torch.Generator().manual_seed(7))
         self.assertTrue(torch.equal(zero['advantages'], torch.zeros_like(zero['advantages'])))
 
-    def test_critic_no_label_input_and_actor_gradient_isolation(self):
-        g = torch.tensor([.2, -.3, .1], dtype=torch.float64, requires_grad=True)
-        critic = torch.nn.Sequential(torch.nn.Linear(7, 8), torch.nn.Tanh(), torch.nn.Linear(8, 1))
-        roll = make_rollout(g, 0, config('ppo'), torch.Generator().manual_seed(7), critic)
-        self.assertTrue(torch.equal(roll['advantages'], roll['reward'][:, None] - roll['old_values']))
-        self.assertTrue(all(not x.requires_grad for x in roll.values()))
-        loss, _ = clipped_task(g, roll)
+    def test_rollout_advantages_are_frozen_and_actor_gradients_are_finite(self):
+        delta = torch.tensor([[.2, -.2], [.5, -.1], [-.2, .7]], dtype=torch.float64, requires_grad=True)
+        scores = delta[:, 0] - delta[:, 1]
+        prior = torch.tensor([1., 2., 3.])
+        cfg = config()
+        rollout = make_rollout(policy_logits(scores, prior, cfg['policy_mode']), 0,
+                               cfg, torch.Generator().manual_seed(7))
+        self.assertTrue(all(not value.requires_grad for value in rollout.values()))
+        loss, _ = objective(delta, scores.detach(), prior, 0, 1, .4, cfg, ['a', 'b', 'c'], rollout)
         loss.backward()
-        self.assertTrue(all(param.grad is None for param in critic.parameters()))
-        before = g.grad.clone()
-        pred = critic(roll['critic_features'][:, :-1]).squeeze(-1)
-        target = roll['reward'][:, None].expand_as(pred).float()
-        torch.nn.functional.mse_loss(pred, target).backward()
-        self.assertTrue(torch.equal(before, g.grad))
-        perm = roll['permutations']
-        self.assertTrue(torch.equal(critic_features(g, perm), roll['critic_features']))
+        self.assertTrue(torch.isfinite(delta.grad).all())
+        self.assertGreater(float(delta.grad.norm()), 0.)
 
-    def test_remaining_mask_and_strict_cuda_sampling_backward(self):
-        permutations = torch.tensor([[3, 0, 2, 1], [1, 2, 0, 3]])
-        scores = torch.tensor([.3, -.1, .8, -.2], dtype=torch.float64)
-        features = critic_features(scores, permutations)
-        for k, permutation in enumerate(permutations.tolist()):
-            for step in range(4):
-                wanted = torch.tensor([float(i in permutation[step:]) for i in range(4)])
-                self.assertTrue(torch.equal(features[k, step, 4:8], wanted))
-        if not torch.cuda.is_available():
-            return
+    def test_strict_deterministic_grpo_backward(self):
+        devices = ['cpu'] + (['cuda'] if torch.cuda.is_available() else [])
         previous = torch.are_deterministic_algorithms_enabled()
         torch.use_deterministic_algorithms(True)
         try:
-            for mode in ['dense', 'fused']:
-                for kind in ['ppo', 'grpo']:
-                    delta = torch.stack((torch.linspace(-.5, .8, 10, device='cuda'),
-                                         torch.linspace(.4, -.2, 10, device='cuda').sin()), -1).requires_grad_()
-                    prior = torch.linspace(.1, .9, 10, device='cuda')
-                    score = delta[:, 0] - delta[:, 1]
-                    cfg = config(kind, mode)
-                    critic = (torch.nn.Sequential(torch.nn.Linear(21, 8), torch.nn.Tanh(),
-                              torch.nn.Linear(8, 1)).cuda() if kind == 'ppo' else None)
-                    rollout = make_rollout(policy_logits(score, prior, mode), 2, cfg,
-                                           torch.Generator(device='cuda').manual_seed(7), critic)
-                    cpu_features = critic_features(rollout['old_logits'], rollout['permutations'])
-                    self.assertTrue(torch.equal(cpu_features, rollout['critic_features']))
-                    loss, _ = objective(delta, score.detach(), prior, 2, 3, .4, cfg,
+            for device in devices:
+                for mode in ['dense', 'fused']:
+                    delta = torch.stack((torch.linspace(-.5, .8, 10, device=device),
+                                         torch.linspace(.4, -.2, 10, device=device).sin()), -1).requires_grad_()
+                    prior = torch.linspace(.1, .9, 10, device=device)
+                    scores = delta[:, 0] - delta[:, 1]
+                    cfg = config(mode)
+                    rollout = make_rollout(policy_logits(scores, prior, mode), 2, cfg,
+                                           torch.Generator(device=device).manual_seed(7))
+                    loss, _ = objective(delta, scores.detach(), prior, 2, 3, .4, cfg,
                                         [str(i) for i in range(10)], rollout)
                     loss.backward()
                     self.assertTrue(torch.isfinite(delta.grad).all())
                     self.assertGreater(float(delta.grad.norm()), 0.)
-                    if critic is not None:
-                        self.assertTrue(all(p.grad is None for p in critic.parameters()))
-                        prediction = critic(rollout['critic_features'].cuda()[:, :-1]).squeeze(-1)
-                        target = rollout['reward'].cuda()[:, None].expand_as(prediction).float()
-                        torch.nn.functional.mse_loss(prediction, target).backward()
-                        self.assertTrue(all(torch.isfinite(p.grad).all() for p in critic.parameters()))
         finally:
             torch.use_deterministic_algorithms(previous)
 

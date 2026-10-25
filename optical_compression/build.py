@@ -3,7 +3,7 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
-from semantic_context.assets import load_validated_items, read_jsonl
+from semantic_context.assets import read_jsonl
 from .strategy import RenderStrategy, SELECTED
 
 SYSTEM = ('You are a music recommendation relevance model. Inspect the DensePage containing '
@@ -31,18 +31,9 @@ def materialize(samples, output):
     return pairs, records, tasks
 
 
-def build(groups, items, output):
-    from semantic_context.samples import pointwise
-    _, samples = pointwise(groups, items)
-    return materialize(samples, output)
-
-
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    source = p.add_mutually_exclusive_group(required=True)
-    source.add_argument('--groups', type=Path)
-    source.add_argument('--samples', type=Path, help='Module-one semantic candidate JSONL')
-    p.add_argument('--item-summaries', type=Path)
+    p.add_argument('--samples', type=Path, required=True, help='Module-one semantic candidate JSONL')
     p.add_argument('--output', type=Path, required=True)
     p.add_argument('--layout', type=Path, default=SELECTED,
                    help='Already-selected layout directory: bundled selected/ or agent-exported frozen/')
@@ -50,20 +41,11 @@ def main():
     if a.output.exists():
         raise FileExistsError(a.output)
     strategy = RenderStrategy(a.layout)
-    if a.samples:
-        samples = read_jsonl(a.samples)
-        if not samples or len({r['sample_id'] for r in samples}) != len(samples):
-            raise ValueError('empty or duplicate samples')
-        pairs, complete, tasks = materialize(samples, a.output)
-        group_count = len({r['group_id'] for r in samples})
-    else:
-        if not a.item_summaries:
-            p.error('--item-summaries is required with --groups')
-        groups = read_jsonl(a.groups)
-        if not groups or len({g['sample_id'] for g in groups}) != len(groups):
-            raise ValueError('empty or duplicate groups')
-        pairs, complete, tasks = build(groups, load_validated_items(a.item_summaries), a.output)
-        group_count = len(groups)
+    samples = read_jsonl(a.samples)
+    if not samples or len({r['sample_id'] for r in samples}) != len(samples):
+        raise ValueError('empty or duplicate samples')
+    pairs, complete, tasks = materialize(samples, a.output)
+    group_count = len({r['group_id'] for r in samples})
     a.output.mkdir(parents=True)
     rendered = strategy.render_tasks(tasks)
     layout = dict(kind=strategy.kind, signature=strategy.signature)

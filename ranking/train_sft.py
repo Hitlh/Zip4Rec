@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import json
 import math
-import sys
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -29,8 +28,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model", type=Path, required=True)
     parser.add_argument("--train-data", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--method", choices=("lora", "qlora"), default="lora")
-    parser.add_argument("--target-set", choices=("qv", "all"), default="all")
     parser.add_argument("--lora-r", type=int, default=8)
     parser.add_argument("--lora-alpha", type=int, default=16)
     parser.add_argument("--lora-dropout", type=float, default=0.05)
@@ -48,7 +45,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--logging-steps", type=int, default=10)
     parser.add_argument("--seed", type=int, default=6061)
     parser.add_argument("--resume-from-checkpoint", type=Path)
-    parser.add_argument("--attn-implementation", choices=("sdpa", "flash_attention_2"), default="sdpa")
     parser.add_argument(
         "--preflight-only",
         action="store_true",

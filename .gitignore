@@ -4,6 +4,8 @@ __pycache__/
 .venv/
 .env
 .env.*
+# Keep the detailed agent guide locally; publish module-level instructions only.
+/optical_compression/optimizer/README.md
 data/
 artifacts/
 runs/

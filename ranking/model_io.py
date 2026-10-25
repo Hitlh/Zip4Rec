@@ -3,13 +3,11 @@ import os
 os.environ.setdefault('CUBLAS_WORKSPACE_CONFIG', ':4096:8')
 os.environ['ACCELERATE_MIXED_PRECISION'] = 'no'
 
-import sys
-from pathlib import Path
 import torch
 from .common import base_fingerprint
 
 
-def setup(project, model_path, adapter, trainable=False, seed=6062, gradient_checkpointing=True):
+def setup(model_path, adapter, trainable=False, seed=6062, gradient_checkpointing=True):
     from .conversation import process_conversation, record_messages
     from .sft_support import verify_verbalizers
     from transformers import AutoProcessor, Qwen3VLForConditionalGeneration, set_seed

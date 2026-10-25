@@ -19,7 +19,7 @@ def main():
     records = rows(a.data)
     if not records or len({r['sample_id'] for r in records}) != len(records):
         raise ValueError('empty input or duplicate sample IDs')
-    model, encode, logits, fingerprint = setup(None, a.model, a.adapter)
+    model, encode, logits, fingerprint = setup(a.model, a.adapter)
     processor = AutoProcessor.from_pretrained(str(a.model), local_files_only=True)
     a.output.parent.mkdir(parents=True, exist_ok=True)
     with a.output.open('x') as stream, torch.inference_mode():
